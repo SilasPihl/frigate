@@ -83,15 +83,22 @@ import ShareTimestampDialog from "@/components/overlay/ShareTimestampDialog";
 import { shareOrCopy } from "@/utils/browserUtil";
 import { createRecordingReviewUrl } from "@/utils/recordingReviewUrl";
 import HistoryGridLayout, { HistoryLayoutPicker } from "./HistoryGridLayout";
+import GridActivityStrip from "./GridActivityStrip";
+import { layoutOrder } from "@/utils/cameraGridUtil";
 import { useHistoryGrid } from "@/hooks/use-history-grid";
 import useKeyboardListener from "@/hooks/use-keyboard-listener";
 import { HISTORY_GRID_PRESETS } from "@/utils/cameraGridUtil";
 
 const DATA_REFRESH_TIME = 600000; // 10 minutes
-// grid cameras further than this from the main camera are seeked back
-const GRID_MAX_DRIFT_SECONDS = 0.5;
-// a seeked grid camera reports a stale time for a moment; leave it alone meanwhile
-const GRID_SEEK_SETTLE_MS = 1500;
+// grid cameras catch up with the main camera by playing a little faster or
+// slower; only further off than this are they seeked, which means rebuffering
+const GRID_SEEK_DRIFT_SECONDS = 2;
+// below this the difference is not visible and the speed is left alone
+const GRID_IN_SYNC_SECONDS = 0.15;
+// most a grid camera's speed is changed to catch up, as a fraction
+const GRID_MAX_RATE_NUDGE = 0.1;
+// a grid camera that has not shown a frame this long after a seek is seeked again
+const GRID_SEEK_RETRY_MS = 10000;
 const GRID_SYNC_INTERVAL_MS = 500;
 
 type RecordingViewProps = {
@@ -182,6 +189,25 @@ export function RecordingView({
   const gridCameraTimes = useRef<{ [camera: string]: number }>({});
   const gridSeekedAt = useRef<{ [camera: string]: number }>({});
   const mainCameraTime = useRef(startTime);
+  // the main camera's own speed, which the grid cameras follow
+  const gridBaseRate = useRef(1);
+
+  // a seeked grid camera reports a stale time until it shows a frame, so its
+  // time is forgotten and sync leaves it alone until it reports again
+  const seekGridCamera = useCallback(
+    (
+      camera: string,
+      controller: DynamicVideoController,
+      time: number,
+      play: boolean,
+    ) => {
+      gridSeekedAt.current[camera] = Date.now();
+      delete gridCameraTimes.current[camera];
+      controller.setPlaybackRate(gridBaseRate.current);
+      controller.seekToTimestamp(time, play);
+    },
+    [],
+  );
 
   const [playbackStart, setPlaybackStart] = useState(
     startTime >= timeRange.after && startTime <= timeRange.before
@@ -379,8 +405,7 @@ export function RecordingView({
           Object.entries(gridControllers.current).forEach(
             ([camera, controller]) => {
               if (camera != mainCamera) {
-                gridSeekedAt.current[camera] = Date.now();
-                controller.seekToTimestamp(time, play);
+                seekGridCamera(camera, controller, time, play);
               }
             },
           );
@@ -389,7 +414,13 @@ export function RecordingView({
         updateSelectedSegment(time, true);
       }
     },
-    [currentTimeRange, updateSelectedSegment, gridActive, mainCamera],
+    [
+      currentTimeRange,
+      updateSelectedSegment,
+      gridActive,
+      mainCamera,
+      seekGridCamera,
+    ],
   );
 
   const onClipPrevious = useCallback(
@@ -527,6 +558,8 @@ export function RecordingView({
     const controller = gridControllers.current[mainCamera];
 
     if (controller) {
+      // a camera that was catching up may still run a little fast or slow
+      controller.setPlaybackRate(gridBaseRate.current);
       mainControllerRef.current = controller;
     }
   }, [gridActive, mainCamera]);
@@ -543,6 +576,7 @@ export function RecordingView({
       const playing = main.isPlaying();
       const rate = main.getPlaybackRate();
       const now = Date.now();
+      gridBaseRate.current = rate;
 
       gridCameras.forEach((camera) => {
         const controller = gridControllers.current[camera];
@@ -550,8 +584,6 @@ export function RecordingView({
         if (camera == mainCamera || !controller) {
           return;
         }
-
-        controller.setPlaybackRate(rate);
 
         if (!controller.hasRecordingAtTime(time)) {
           if (controller.isPlaying()) {
@@ -561,24 +593,59 @@ export function RecordingView({
           return;
         }
 
-        const settling =
-          now - (gridSeekedAt.current[camera] ?? 0) < GRID_SEEK_SETTLE_MS;
-        const cameraTime = gridCameraTimes.current[camera];
-        const drifted =
-          cameraTime == undefined ||
-          Math.abs(cameraTime - time) > GRID_MAX_DRIFT_SECONDS;
+        if (force) {
+          seekGridCamera(camera, controller, time, playing);
+          return;
+        }
 
-        if (force || (!settling && drifted)) {
-          gridSeekedAt.current[camera] = now;
-          controller.seekToTimestamp(time, playing);
-        } else if (playing && !controller.isPlaying() && !settling) {
+        const cameraTime = gridCameraTimes.current[camera];
+
+        // still loading after a seek or at the start: let it load, and only
+        // try again if it never shows a frame
+        if (cameraTime == undefined) {
+          const seekedAt = gridSeekedAt.current[camera];
+
+          if (seekedAt != undefined && now - seekedAt > GRID_SEEK_RETRY_MS) {
+            seekGridCamera(camera, controller, time, playing);
+          } else if (playing && !controller.isPlaying()) {
+            controller.play();
+          }
+
+          return;
+        }
+
+        const drift = cameraTime - time;
+
+        if (Math.abs(drift) > GRID_SEEK_DRIFT_SECONDS) {
+          seekGridCamera(camera, controller, time, playing);
+          return;
+        }
+
+        if (!playing) {
+          if (controller.isPlaying()) {
+            controller.pause();
+          }
+
+          controller.setPlaybackRate(rate);
+          return;
+        }
+
+        // ahead plays slower, behind plays faster, in step plays as the main
+        const nudge =
+          Math.abs(drift) < GRID_IN_SYNC_SECONDS
+            ? 0
+            : Math.max(
+                -GRID_MAX_RATE_NUDGE,
+                Math.min(GRID_MAX_RATE_NUDGE, drift / 2),
+              );
+        controller.setPlaybackRate(rate * (1 - nudge));
+
+        if (!controller.isPlaying() && controller.isReady()) {
           controller.play();
-        } else if (!playing && controller.isPlaying()) {
-          controller.pause();
         }
       });
     },
-    [gridActive, mainCamera, gridCameras],
+    [gridActive, mainCamera, gridCameras, seekGridCamera],
   );
 
   // the view re-renders several times a second while playing, so the timer
@@ -1119,72 +1186,95 @@ export function RecordingView({
             )}
           >
             {gridActive ? (
-              <HistoryGridLayout
-                layout={historyGrid.layout}
-                mainCamera={mainCamera}
-                enlargedCamera={enlargedCamera}
-                isEditMode={isGridEditMode}
-                setIsEditMode={setIsGridEditMode}
-                onSaveLayout={historyGrid.saveLayout}
-                onSelectCamera={onSelectGridCamera}
-                onEnlargeCamera={onEnlargeGridCamera}
-                onSwapCameras={historyGrid.swapCameras}
-                audibleCameras={audibleCameras}
-                onToggleAudio={(camera) =>
-                  setAudibleCameras((current) =>
-                    current.includes(camera)
-                      ? current.filter((c) => c != camera)
-                      : [...current, camera],
-                  )
-                }
-                renderCamera={(camera, isMain) => (
-                  <DynamicVideoPlayer
-                    key={camera}
-                    className="size-full"
-                    camera={camera}
-                    timeRange={currentTimeRange}
-                    cameraPreviews={allPreviews ?? []}
-                    startTimestamp={playbackStart}
-                    hotKeys={
-                      isMain &&
-                      exportMode != "select" &&
-                      debugReplayMode != "select"
+              <div className="flex size-full min-h-0 flex-col gap-2">
+                <div className="min-h-0 flex-1">
+                  <HistoryGridLayout
+                    layout={historyGrid.layout}
+                    mainCamera={mainCamera}
+                    enlargedCamera={enlargedCamera}
+                    isEditMode={isGridEditMode}
+                    setIsEditMode={setIsGridEditMode}
+                    onSaveLayout={historyGrid.saveLayout}
+                    onSelectCamera={onSelectGridCamera}
+                    onEnlargeCamera={onEnlargeGridCamera}
+                    onSwapCameras={historyGrid.swapCameras}
+                    audibleCameras={audibleCameras}
+                    onToggleAudio={(camera) =>
+                      setAudibleCameras((current) =>
+                        current.includes(camera)
+                          ? current.filter((c) => c != camera)
+                          : [...current, camera],
+                      )
                     }
-                    follower={!isMain}
-                    followerMuted={!audibleCameras.includes(camera)}
-                    fullscreen={fullscreen}
-                    onTimestampUpdate={
-                      isMain
-                        ? onMainTimestampUpdate
-                        : (timestamp) => {
-                            gridCameraTimes.current[camera] = timestamp;
-                          }
-                    }
-                    onClipEnded={isMain ? onClipEnded : undefined}
-                    onClipPrevious={isMain ? onClipPrevious : undefined}
-                    onSeekToTime={manuallySetCurrentTime}
-                    onControllerReady={(controller) => {
-                      gridControllers.current[camera] = controller;
+                    renderCamera={(camera, isMain) => (
+                      <DynamicVideoPlayer
+                        key={camera}
+                        className="size-full"
+                        camera={camera}
+                        timeRange={currentTimeRange}
+                        cameraPreviews={allPreviews ?? []}
+                        startTimestamp={playbackStart}
+                        hotKeys={
+                          isMain &&
+                          exportMode != "select" &&
+                          debugReplayMode != "select"
+                        }
+                        follower={!isMain}
+                        followerMuted={!audibleCameras.includes(camera)}
+                        fullscreen={fullscreen}
+                        onTimestampUpdate={
+                          isMain
+                            ? onMainTimestampUpdate
+                            : (timestamp) => {
+                                gridCameraTimes.current[camera] = timestamp;
+                              }
+                        }
+                        onClipEnded={isMain ? onClipEnded : undefined}
+                        onClipPrevious={isMain ? onClipPrevious : undefined}
+                        onSeekToTime={manuallySetCurrentTime}
+                        onControllerReady={(controller) => {
+                          gridControllers.current[camera] = controller;
 
-                      if (isMain) {
-                        mainControllerRef.current = controller;
-                      }
-                    }}
-                    isScrubbing={
-                      scrubbing ||
-                      exportMode == "timeline" ||
-                      exportMode == "timeline_multi" ||
-                      debugReplayMode == "timeline"
-                    }
-                    supportsFullscreen={supportsFullScreen}
-                    setFullResolution={
-                      isMain ? setFullResolution : ignoreFullResolution
-                    }
-                    toggleFullscreen={toggleFullscreen}
-                    containerRef={mainLayoutRef}
+                          if (isMain) {
+                            mainControllerRef.current = controller;
+                          }
+                        }}
+                        isScrubbing={
+                          scrubbing ||
+                          exportMode == "timeline" ||
+                          exportMode == "timeline_multi" ||
+                          debugReplayMode == "timeline"
+                        }
+                        supportsFullscreen={supportsFullScreen}
+                        setFullResolution={
+                          isMain ? setFullResolution : ignoreFullResolution
+                        }
+                        toggleFullscreen={toggleFullscreen}
+                        containerRef={mainLayoutRef}
+                      />
+                    )}
                   />
-                )}
-              />
+                </div>
+                <GridActivityStrip
+                  config={config}
+                  timezone={timezone}
+                  cameras={layoutOrder(historyGrid.layout)}
+                  mainCamera={mainCamera}
+                  timeRange={currentTimeRange}
+                  currentTime={currentTime}
+                  reviewItems={reviewItems ?? []}
+                  onSeek={(time, camera) => {
+                    if (camera && camera != mainCamera) {
+                      onSelectGridCamera(camera);
+                    }
+
+                    manuallySetCurrentTime(time, true);
+                  }}
+                  onSelectCamera={onSelectGridCamera}
+                  setScrubbing={setScrubbing}
+                  setCurrentTime={setCurrentTime}
+                />
+              </div>
             ) : (
               <div
                 className={cn(

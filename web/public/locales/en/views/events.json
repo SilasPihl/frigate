@@ -32,6 +32,11 @@
     "editHint": "Drag a camera to move it, drag a corner to resize it. Press Esc when done.",
     "unmute": "Play this camera's sound too",
     "mute": "Mute this camera",
+    "activity": {
+      "show": "Show activity",
+      "hide": "Hide",
+      "makeMain": "Make this the main camera"
+    },
     "shortcuts": {
       "title": "Keyboard shortcuts",
       "playPause": "Play or pause",
