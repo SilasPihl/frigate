@@ -30,6 +30,7 @@
     "doneEditing": "Done",
     "editShortcut": "Move and resize cameras (E)",
     "editHint": "Drag a camera to move it, drag a corner to resize it. Press Esc when done.",
+    "noRecordings": "No recordings in this hour",
     "unmute": "Play this camera's sound too",
     "mute": "Mute this camera",
     "activity": {
