@@ -28,6 +28,8 @@ import {
   VolumeState,
 } from "@/types/live";
 import { ASPECT_VERTICAL_LAYOUT, ASPECT_WIDE_LAYOUT } from "@/types/record";
+import CornerCircles from "@/components/grid/CornerCircles";
+import { keepAspectOnResize } from "@/utils/cameraGridUtil";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useResizeObserver } from "@/hooks/resize-observer";
 import { isEqual } from "lodash";
@@ -361,49 +363,7 @@ export default function DraggableGridLayout({
     );
   }, [availableWidth, marginValue]);
 
-  const handleResize = (
-    _layout: Layout,
-    oldLayoutItem: LayoutItem | null,
-    layoutItem: LayoutItem | null,
-    placeholder: LayoutItem | null,
-  ) => {
-    if (!oldLayoutItem || !layoutItem || !placeholder) return;
-
-    const heightDiff = layoutItem.h - oldLayoutItem.h;
-    const widthDiff = layoutItem.w - oldLayoutItem.w;
-    const changeCoef = oldLayoutItem.w / oldLayoutItem.h;
-
-    let newWidth, newHeight;
-
-    if (Math.abs(heightDiff) < Math.abs(widthDiff)) {
-      newHeight = Math.round(layoutItem.w / changeCoef);
-      newWidth = Math.round(newHeight * changeCoef);
-    } else {
-      newWidth = Math.round(layoutItem.h * changeCoef);
-      newHeight = Math.round(newWidth / changeCoef);
-    }
-
-    // Ensure dimensions maintain aspect ratio and fit within the grid
-    if (layoutItem.x + newWidth > 12) {
-      newWidth = 12 - layoutItem.x;
-      newHeight = Math.round(newWidth / changeCoef);
-    }
-
-    if (changeCoef == 0.5) {
-      // portrait
-      newHeight = Math.ceil(newHeight / 2) * 2;
-    } else if (changeCoef == 2) {
-      // pano/wide
-      newHeight = Math.ceil(newHeight * 2) / 2;
-    }
-
-    newWidth = Math.round(newHeight * changeCoef);
-
-    layoutItem.w = newWidth;
-    layoutItem.h = newHeight;
-    placeholder.w = layoutItem.w;
-    placeholder.h = layoutItem.h;
-  };
+  const handleResize = keepAspectOnResize;
 
   // audio and stats states
 
@@ -769,17 +729,6 @@ export default function DraggableGridLayout({
           )}
         </div>
       )}
-    </>
-  );
-}
-
-function CornerCircles() {
-  return (
-    <>
-      <div className="pointer-events-none absolute left-[-4px] top-[-4px] z-50 size-3 rounded-full bg-primary-variant p-2 text-background outline-2 outline-muted" />
-      <div className="pointer-events-none absolute right-[-4px] top-[-4px] z-50 size-3 rounded-full bg-primary-variant p-2 text-background outline-2 outline-muted" />
-      <div className="pointer-events-none absolute bottom-[-4px] right-[-4px] z-50 size-3 rounded-full bg-primary-variant p-2 text-background outline-2 outline-muted" />
-      <div className="pointer-events-none absolute bottom-[-4px] left-[-4px] z-50 size-3 rounded-full bg-primary-variant p-2 text-background outline-2 outline-muted" />
     </>
   );
 }

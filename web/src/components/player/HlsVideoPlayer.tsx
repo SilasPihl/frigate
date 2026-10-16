@@ -45,6 +45,8 @@ type HlsVideoPlayerProps = {
   supportsFullscreen: boolean;
   fullscreen: boolean;
   frigateControls?: boolean;
+  // a muted, control-less player that another player keeps in sync
+  follower?: boolean;
   inpointOffset?: number;
   onClipEnded?: (currentTime: number) => void;
   onClipPrevious?: (diff: number) => void;
@@ -73,6 +75,7 @@ export default function HlsVideoPlayer({
   supportsFullscreen,
   fullscreen,
   frigateControls = true,
+  follower = false,
   inpointOffset = 0,
   onClipEnded,
   onClipPrevious,
@@ -312,9 +315,9 @@ export default function HlsVideoPlayer({
       minScale={1.0}
       wheel={{ smoothStep: 0.005 }}
       onZoom={(zoom) => setZoomScale(zoom.state.scale)}
-      disabled={!frigateControls}
+      disabled={!frigateControls || follower}
     >
-      {frigateControls && (
+      {frigateControls && !follower && (
         <VideoControls
           className={cn(
             "absolute left-1/2 z-50 -translate-x-1/2",
@@ -446,9 +449,9 @@ export default function HlsVideoPlayer({
             autoPlay
             controls={!frigateControls}
             playsInline
-            muted={muted}
+            muted={muted || follower}
             onClick={
-              isDesktop
+              isDesktop && !follower
                 ? () => {
                     if (zoomScale == 1.0) onPlayPause(!isPlaying);
                   }

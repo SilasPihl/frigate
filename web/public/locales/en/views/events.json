@@ -19,6 +19,14 @@
     "label": "Timeline",
     "aria": "Select timeline"
   },
+  "grid": {
+    "layout": "Camera layout",
+    "single": "One camera",
+    "preset": "{{columns}} wide, {{rows}} high, the rest small below",
+    "custom": "Custom",
+    "enlarge": "Enlarge",
+    "backToGrid": "Back to grid"
+  },
   "zoomIn": "Zoom In",
   "zoomOut": "Zoom Out",
   "events": {

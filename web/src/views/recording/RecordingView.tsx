@@ -81,8 +81,15 @@ import {
 import ShareTimestampDialog from "@/components/overlay/ShareTimestampDialog";
 import { shareOrCopy } from "@/utils/browserUtil";
 import { createRecordingReviewUrl } from "@/utils/recordingReviewUrl";
+import HistoryGridLayout, { HistoryLayoutPicker } from "./HistoryGridLayout";
+import { useHistoryGrid } from "@/hooks/use-history-grid";
 
 const DATA_REFRESH_TIME = 600000; // 10 minutes
+// grid cameras further than this from the main camera are seeked back
+const GRID_MAX_DRIFT_SECONDS = 0.5;
+// a seeked grid camera reports a stale time for a moment; leave it alone meanwhile
+const GRID_SEEK_SETTLE_MS = 1500;
+const GRID_SYNC_INTERVAL_MS = 500;
 
 type RecordingViewProps = {
   startCamera: string;
@@ -148,6 +155,28 @@ export function RecordingView({
   const cameraLayoutRef = useRef<HTMLDivElement | null>(null);
   const previewRowRef = useRef<HTMLDivElement | null>(null);
   const previewRefs = useRef<{ [camera: string]: PreviewController }>({});
+
+  // grid of every selected camera, kept in step with the main camera
+
+  // cameras switched off in the config have nothing new to show; keyed by
+  // content because the camera list is rebuilt on every render
+  const gridCamerasKey = effectiveCameras
+    .filter((camera) => config?.cameras[camera]?.enabled_in_config !== false)
+    .join(",");
+  const gridCameras = useMemo(
+    () => (gridCamerasKey ? gridCamerasKey.split(",") : []),
+    [gridCamerasKey],
+  );
+  const historyGrid = useHistoryGrid(gridCameras);
+  const gridActive = isDesktop && historyGrid.mode == "grid";
+  const [isGridEditMode, setIsGridEditMode] = useState(false);
+  const [enlargedCamera, setEnlargedCamera] = useState<string>();
+  const gridControllers = useRef<{ [camera: string]: DynamicVideoController }>(
+    {},
+  );
+  const gridCameraTimes = useRef<{ [camera: string]: number }>({});
+  const gridSeekedAt = useRef<{ [camera: string]: number }>({});
+  const mainCameraTime = useRef(startTime);
 
   const [playbackStart, setPlaybackStart] = useState(
     startTime >= timeRange.after && startTime <= timeRange.before
@@ -309,6 +338,16 @@ export function RecordingView({
       Object.values(previewRefs.current).forEach((controller) => {
         controller.scrubToTimestamp(currentTime);
       });
+
+      if (gridActive) {
+        Object.entries(gridControllers.current).forEach(
+          ([camera, controller]) => {
+            if (camera != mainCamera) {
+              controller.scrubToTimestamp(currentTime);
+            }
+          },
+        );
+      }
     }
     // we only want to seek when current time updates
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -329,11 +368,23 @@ export function RecordingView({
 
       if (currentTimeRange.after <= time && currentTimeRange.before >= time) {
         mainControllerRef.current?.seekToTimestamp(time, play);
+
+        if (gridActive) {
+          mainCameraTime.current = time;
+          Object.entries(gridControllers.current).forEach(
+            ([camera, controller]) => {
+              if (camera != mainCamera) {
+                gridSeekedAt.current[camera] = Date.now();
+                controller.seekToTimestamp(time, play);
+              }
+            },
+          );
+        }
       } else {
         updateSelectedSegment(time, true);
       }
     },
-    [currentTimeRange, updateSelectedSegment],
+    [currentTimeRange, updateSelectedSegment, gridActive, mainCamera],
   );
 
   const onClipPrevious = useCallback(
@@ -422,6 +473,139 @@ export function RecordingView({
     },
     [currentTime, allowedCameras],
   );
+
+  // grid: the main camera drives the clock and the timeline, the others follow
+
+  const onMainTimestampUpdate = useCallback((timestamp: number) => {
+    mainCameraTime.current = timestamp;
+    setPlayerTime(timestamp);
+    setCurrentTime(timestamp);
+    Object.values(previewRefs.current ?? {}).forEach((prev) =>
+      prev.scrubToTimestamp(Math.floor(timestamp)),
+    );
+  }, []);
+
+  const ignoreFullResolution = useCallback<
+    React.Dispatch<React.SetStateAction<VideoResolutionType>>
+  >(() => {}, []);
+
+  const onSelectGridCamera = useCallback(
+    (camera: string) => {
+      if (allowedCameras.includes(camera)) {
+        mainCameraTime.current = currentTime;
+        setMainCamera(camera);
+      }
+    },
+    [allowedCameras, currentTime],
+  );
+
+  const onEnlargeGridCamera = useCallback(
+    (camera: string | undefined) => {
+      if (camera) {
+        onSelectGridCamera(camera);
+      }
+
+      setEnlargedCamera(camera);
+    },
+    [onSelectGridCamera],
+  );
+
+  useEffect(() => {
+    if (!gridActive) {
+      gridControllers.current = {};
+      gridCameraTimes.current = {};
+      setIsGridEditMode(false);
+      setEnlargedCamera(undefined);
+      return;
+    }
+
+    const controller = gridControllers.current[mainCamera];
+
+    if (controller) {
+      mainControllerRef.current = controller;
+    }
+  }, [gridActive, mainCamera]);
+
+  const syncGridCameras = useCallback(
+    (force: boolean) => {
+      const main = mainControllerRef.current;
+
+      if (!gridActive || !main) {
+        return;
+      }
+
+      const time = mainCameraTime.current;
+      const playing = main.isPlaying();
+      const rate = main.getPlaybackRate();
+      const now = Date.now();
+
+      gridCameras.forEach((camera) => {
+        const controller = gridControllers.current[camera];
+
+        if (camera == mainCamera || !controller) {
+          return;
+        }
+
+        controller.setPlaybackRate(rate);
+
+        if (!controller.hasRecordingAtTime(time)) {
+          if (controller.isPlaying()) {
+            controller.pause();
+          }
+
+          return;
+        }
+
+        const settling =
+          now - (gridSeekedAt.current[camera] ?? 0) < GRID_SEEK_SETTLE_MS;
+        const cameraTime = gridCameraTimes.current[camera];
+        const drifted =
+          cameraTime == undefined ||
+          Math.abs(cameraTime - time) > GRID_MAX_DRIFT_SECONDS;
+
+        if (force || (!settling && drifted)) {
+          gridSeekedAt.current[camera] = now;
+          controller.seekToTimestamp(time, playing);
+        } else if (playing && !controller.isPlaying() && !settling) {
+          controller.play();
+        } else if (!playing && controller.isPlaying()) {
+          controller.pause();
+        }
+      });
+    },
+    [gridActive, mainCamera, gridCameras],
+  );
+
+  // the view re-renders several times a second while playing, so the timer
+  // reads the latest sync function from a ref instead of restarting
+  const syncGridCamerasRef = useRef(syncGridCameras);
+  syncGridCamerasRef.current = syncGridCameras;
+
+  useEffect(() => {
+    if (!gridActive || scrubbing || exportRange || debugReplayRange) {
+      return;
+    }
+
+    const interval = setInterval(
+      () => syncGridCamerasRef.current(false),
+      GRID_SYNC_INTERVAL_MS,
+    );
+
+    return () => clearInterval(interval);
+  }, [gridActive, scrubbing, exportRange, debugReplayRange]);
+
+  const wasScrubbing = useRef(false);
+
+  useEffect(() => {
+    if (wasScrubbing.current && !scrubbing && gridActive) {
+      mainCameraTime.current = currentTime;
+      syncGridCameras(true);
+    }
+
+    wasScrubbing.current = scrubbing;
+    // only when scrubbing ends
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrubbing]);
 
   // fullscreen
 
@@ -650,6 +834,24 @@ export function RecordingView({
             </Button>
           </div>
           <div className="flex items-center justify-end gap-2">
+            {isDesktop && gridCameras.length > 1 && historyGrid.loaded && (
+              <HistoryLayoutPicker
+                mode={historyGrid.mode}
+                preset={historyGrid.preset}
+                onSelectSingle={() => {
+                  setPlaybackStart(currentTime);
+                  historyGrid.showSingle();
+                }}
+                onSelectPreset={(preset) => {
+                  if (!gridActive) {
+                    setPlaybackStart(currentTime);
+                  }
+
+                  setEnlargedCamera(undefined);
+                  historyGrid.applyPreset(preset, mainCamera);
+                }}
+              />
+            )}
             <MobileCameraDrawer
               allCameras={effectiveCameras}
               selected={mainCamera}
@@ -856,137 +1058,190 @@ export function RecordingView({
                 : "portrait:max-h-[50dvh] portrait:flex-shrink-0 portrait:flex-grow-0 portrait:basis-auto",
             )}
           >
-            <div
-              className={cn(
-                "flex size-full items-center",
-                mainCameraAspect == "tall"
-                  ? "flex-row justify-evenly"
-                  : "flex-col justify-center gap-2",
-              )}
-            >
-              <div
-                key={mainCamera}
-                className={cn(
-                  "relative flex max-h-full min-h-0 min-w-0 max-w-full items-center justify-center",
-                  isDesktop
-                    ? // Desktop: dynamically switch between w-full and h-full based on
-                      // container vs camera aspect ratio to ensure proper fitting
-                      useHeightBased
-                      ? "h-full"
-                      : "w-full"
-                    : cn(
-                        "flex-shrink-0 portrait:w-full landscape:h-full",
-                        mainCameraAspect == "wide"
-                          ? "aspect-wide"
-                          : mainCameraAspect == "tall"
-                            ? "aspect-tall portrait:h-full"
-                            : "aspect-video",
-                      ),
-                )}
-                style={{
-                  aspectRatio: getCameraAspect(mainCamera),
-                }}
-              >
-                {(isDesktop || isTablet) && (
-                  <GenAISummaryDialog
-                    review={activeReviewItem}
-                    onOpen={onAnalysisOpen}
-                  >
-                    <GenAISummaryChip review={activeReviewItem} />
-                  </GenAISummaryDialog>
-                )}
-
-                <DynamicVideoPlayer
-                  className={grow}
-                  camera={mainCamera}
-                  timeRange={currentTimeRange}
-                  cameraPreviews={allPreviews ?? []}
-                  startTimestamp={playbackStart}
-                  hotKeys={
-                    exportMode != "select" && debugReplayMode != "select"
-                  }
-                  fullscreen={fullscreen}
-                  onTimestampUpdate={(timestamp) => {
-                    setPlayerTime(timestamp);
-                    setCurrentTime(timestamp);
-                    Object.values(previewRefs.current ?? {}).forEach((prev) =>
-                      prev.scrubToTimestamp(Math.floor(timestamp)),
-                    );
-                  }}
-                  onClipEnded={onClipEnded}
-                  onClipPrevious={onClipPrevious}
-                  onSeekToTime={manuallySetCurrentTime}
-                  onControllerReady={(controller) => {
-                    mainControllerRef.current = controller;
-                  }}
-                  isScrubbing={
-                    scrubbing ||
-                    exportMode == "timeline" ||
-                    exportMode == "timeline_multi" ||
-                    debugReplayMode == "timeline"
-                  }
-                  supportsFullscreen={supportsFullScreen}
-                  setFullResolution={setFullResolution}
-                  toggleFullscreen={toggleFullscreen}
-                  containerRef={mainLayoutRef}
-                />
-              </div>
-              {isDesktop && effectiveCameras.length > 1 && (
-                <div
-                  ref={previewRowRef}
-                  className={cn(
-                    "scrollbar-container flex flex-shrink-0 gap-2 overflow-auto",
-                    mainCameraAspect == "tall"
-                      ? "ml-2 h-full w-72 min-w-72 flex-col"
-                      : "h-28 min-h-28 w-full",
-                    previewRowOverflows ? "" : "items-center justify-center",
-                    timelineType == "detail" && isDesktop && "mt-4",
-                  )}
-                >
-                  <div className="w-2" />
-                  {effectiveCameras.map((cam) => {
-                    if (cam == mainCamera || cam == "birdseye") {
-                      return;
+            {gridActive ? (
+              <HistoryGridLayout
+                layout={historyGrid.layout}
+                mainCamera={mainCamera}
+                enlargedCamera={enlargedCamera}
+                isEditMode={isGridEditMode}
+                setIsEditMode={setIsGridEditMode}
+                onSaveLayout={historyGrid.saveLayout}
+                onSelectCamera={onSelectGridCamera}
+                onEnlargeCamera={onEnlargeGridCamera}
+                renderCamera={(camera, isMain) => (
+                  <DynamicVideoPlayer
+                    key={camera}
+                    className="size-full"
+                    camera={camera}
+                    timeRange={currentTimeRange}
+                    cameraPreviews={allPreviews ?? []}
+                    startTimestamp={playbackStart}
+                    hotKeys={
+                      isMain &&
+                      exportMode != "select" &&
+                      debugReplayMode != "select"
                     }
+                    follower={!isMain}
+                    fullscreen={fullscreen}
+                    onTimestampUpdate={
+                      isMain
+                        ? onMainTimestampUpdate
+                        : (timestamp) => {
+                            gridCameraTimes.current[camera] = timestamp;
+                          }
+                    }
+                    onClipEnded={isMain ? onClipEnded : undefined}
+                    onClipPrevious={isMain ? onClipPrevious : undefined}
+                    onSeekToTime={manuallySetCurrentTime}
+                    onControllerReady={(controller) => {
+                      gridControllers.current[camera] = controller;
 
-                    return (
-                      <Tooltip key={cam}>
-                        <TooltipTrigger asChild>
-                          <div
-                            className={
-                              mainCameraAspect == "tall" ? "w-full" : "h-full"
-                            }
-                            style={{
-                              aspectRatio: getCameraAspect(cam),
-                            }}
-                          >
-                            <PreviewPlayer
-                              previewRef={previewRef}
-                              className="size-full"
-                              camera={cam}
-                              timeRange={currentTimeRange}
-                              cameraPreviews={allPreviews ?? []}
-                              startTime={startTime}
-                              isScrubbing={scrubbing}
-                              isVisible={visiblePreviews.includes(cam)}
-                              onControllerReady={(controller) => {
-                                previewRefs.current[cam] = controller;
-                                controller.scrubToTimestamp(startTime);
-                              }}
-                              onClick={() => onSelectCamera(cam)}
-                            />
-                          </div>
-                        </TooltipTrigger>
-                        <TooltipContent className="smart-capitalize">
-                          <CameraNameLabel camera={cam} />
-                        </TooltipContent>
-                      </Tooltip>
-                    );
-                  })}
-                  <div className="w-2" />
+                      if (isMain) {
+                        mainControllerRef.current = controller;
+                      }
+                    }}
+                    isScrubbing={
+                      scrubbing ||
+                      exportMode == "timeline" ||
+                      exportMode == "timeline_multi" ||
+                      debugReplayMode == "timeline"
+                    }
+                    supportsFullscreen={supportsFullScreen}
+                    setFullResolution={
+                      isMain ? setFullResolution : ignoreFullResolution
+                    }
+                    toggleFullscreen={toggleFullscreen}
+                    containerRef={mainLayoutRef}
+                  />
+                )}
+              />
+            ) : (
+              <div
+                className={cn(
+                  "flex size-full items-center",
+                  mainCameraAspect == "tall"
+                    ? "flex-row justify-evenly"
+                    : "flex-col justify-center gap-2",
+                )}
+              >
+                <div
+                  key={mainCamera}
+                  className={cn(
+                    "relative flex max-h-full min-h-0 min-w-0 max-w-full items-center justify-center",
+                    isDesktop
+                      ? // Desktop: dynamically switch between w-full and h-full based on
+                        // container vs camera aspect ratio to ensure proper fitting
+                        useHeightBased
+                        ? "h-full"
+                        : "w-full"
+                      : cn(
+                          "flex-shrink-0 portrait:w-full landscape:h-full",
+                          mainCameraAspect == "wide"
+                            ? "aspect-wide"
+                            : mainCameraAspect == "tall"
+                              ? "aspect-tall portrait:h-full"
+                              : "aspect-video",
+                        ),
+                  )}
+                  style={{
+                    aspectRatio: getCameraAspect(mainCamera),
+                  }}
+                >
+                  {(isDesktop || isTablet) && (
+                    <GenAISummaryDialog
+                      review={activeReviewItem}
+                      onOpen={onAnalysisOpen}
+                    >
+                      <GenAISummaryChip review={activeReviewItem} />
+                    </GenAISummaryDialog>
+                  )}
+
+                  <DynamicVideoPlayer
+                    className={grow}
+                    camera={mainCamera}
+                    timeRange={currentTimeRange}
+                    cameraPreviews={allPreviews ?? []}
+                    startTimestamp={playbackStart}
+                    hotKeys={
+                      exportMode != "select" && debugReplayMode != "select"
+                    }
+                    fullscreen={fullscreen}
+                    onTimestampUpdate={onMainTimestampUpdate}
+                    onClipEnded={onClipEnded}
+                    onClipPrevious={onClipPrevious}
+                    onSeekToTime={manuallySetCurrentTime}
+                    onControllerReady={(controller) => {
+                      mainControllerRef.current = controller;
+                    }}
+                    isScrubbing={
+                      scrubbing ||
+                      exportMode == "timeline" ||
+                      exportMode == "timeline_multi" ||
+                      debugReplayMode == "timeline"
+                    }
+                    supportsFullscreen={supportsFullScreen}
+                    setFullResolution={setFullResolution}
+                    toggleFullscreen={toggleFullscreen}
+                    containerRef={mainLayoutRef}
+                  />
                 </div>
-              )}
-            </div>
+                {isDesktop && effectiveCameras.length > 1 && (
+                  <div
+                    ref={previewRowRef}
+                    className={cn(
+                      "scrollbar-container flex flex-shrink-0 gap-2 overflow-auto",
+                      mainCameraAspect == "tall"
+                        ? "ml-2 h-full w-72 min-w-72 flex-col"
+                        : "h-28 min-h-28 w-full",
+                      previewRowOverflows ? "" : "items-center justify-center",
+                      timelineType == "detail" && isDesktop && "mt-4",
+                    )}
+                  >
+                    <div className="w-2" />
+                    {effectiveCameras.map((cam) => {
+                      if (cam == mainCamera || cam == "birdseye") {
+                        return;
+                      }
+
+                      return (
+                        <Tooltip key={cam}>
+                          <TooltipTrigger asChild>
+                            <div
+                              className={
+                                mainCameraAspect == "tall" ? "w-full" : "h-full"
+                              }
+                              style={{
+                                aspectRatio: getCameraAspect(cam),
+                              }}
+                            >
+                              <PreviewPlayer
+                                previewRef={previewRef}
+                                className="size-full"
+                                camera={cam}
+                                timeRange={currentTimeRange}
+                                cameraPreviews={allPreviews ?? []}
+                                startTime={startTime}
+                                isScrubbing={scrubbing}
+                                isVisible={visiblePreviews.includes(cam)}
+                                onControllerReady={(controller) => {
+                                  previewRefs.current[cam] = controller;
+                                  controller.scrubToTimestamp(startTime);
+                                }}
+                                onClick={() => onSelectCamera(cam)}
+                              />
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent className="smart-capitalize">
+                            <CameraNameLabel camera={cam} />
+                          </TooltipContent>
+                        </Tooltip>
+                      );
+                    })}
+                    <div className="w-2" />
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <Timeline
             contentRef={contentRef}
