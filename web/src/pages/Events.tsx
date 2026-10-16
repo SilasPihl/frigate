@@ -6,7 +6,7 @@ import { useTimezone } from "@/hooks/use-date-utils";
 import { useOverlayState, useSearchEffect } from "@/hooks/use-overlay-state";
 import { useUserPersistence } from "@/hooks/use-user-persistence";
 import { FrigateConfig } from "@/types/frigateConfig";
-import { RecordingStartingPoint } from "@/types/record";
+import { RecordingPosition, RecordingStartingPoint } from "@/types/record";
 import {
   RecordingsSummary,
   REVIEW_PADDING,
@@ -247,16 +247,31 @@ export default function Events() {
   });
 
   const onUpdateFilter = useCallback(
-    (newFilter: ReviewFilter) => {
+    (newFilter: ReviewFilter, position?: RecordingPosition) => {
       setReviewFilter(newFilter);
 
-      // update recording start time if filter
-      // was changed on recording page
-      if (recording != undefined && newFilter.after != undefined) {
-        setRecording({ ...recording, startTime: newFilter.after }, true);
+      if (recording == undefined) {
+        return;
+      }
+
+      // a new date on the recording page starts at that date; any other
+      // filter change keeps the place being watched
+      const newAfter = newFilter.after;
+      const dateChanged =
+        newAfter != undefined &&
+        (newAfter != reviewFilter?.after ||
+          newFilter.before != reviewFilter?.before);
+
+      if (dateChanged) {
+        setRecording({ ...recording, startTime: newAfter }, true);
+      } else if (position) {
+        setRecording(
+          { ...recording, camera: position.camera, startTime: position.time },
+          true,
+        );
       }
     },
-    [recording, setRecording, setReviewFilter],
+    [recording, reviewFilter, setRecording, setReviewFilter],
   );
 
   useSearchEffect(RECORDING_REVIEW_LINK_PARAM, (reviewLinkValue: string) => {

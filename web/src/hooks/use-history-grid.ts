@@ -70,6 +70,31 @@ export function useHistoryGrid(cameras: string[]) {
     [setStored],
   );
 
+  // two cameras trade places and sizes; a quick layout stays a quick layout
+  const swapCameras = useCallback(
+    (first: string, second: string) => {
+      const a = layout.find((item) => item.i == first);
+      const b = layout.find((item) => item.i == second);
+
+      if (!a || !b || first == second) {
+        return;
+      }
+
+      setStored({
+        mode: "grid",
+        preset: stored?.preset ?? null,
+        layout: layout.map((item) =>
+          item.i == first
+            ? { ...b, i: first }
+            : item.i == second
+              ? { ...a, i: second }
+              : item,
+        ),
+      });
+    },
+    [layout, setStored, stored?.preset],
+  );
+
   return {
     loaded,
     mode,
@@ -78,5 +103,6 @@ export function useHistoryGrid(cameras: string[]) {
     applyPreset,
     showSingle,
     saveLayout,
+    swapCameras,
   };
 }
