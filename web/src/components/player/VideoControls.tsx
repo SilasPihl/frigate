@@ -162,10 +162,10 @@ export default function VideoControls({
           onSeek(-1);
           break;
         case "ArrowLeft":
-          onSeek(-10);
+          onSeek(modifiers.shift ? -60 : -10);
           break;
         case "ArrowRight":
-          onSeek(10);
+          onSeek(modifiers.shift ? 60 : 10);
           break;
         case "ArrowUp":
           onSeek(1);
