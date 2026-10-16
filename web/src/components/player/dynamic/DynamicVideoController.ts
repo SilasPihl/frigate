@@ -72,7 +72,23 @@ export class DynamicVideoController {
   }
 
   isPlaying(): boolean {
-    return !this.playerController.paused && !this.playerController.ended;
+    return (
+      (!this.playerController.paused && !this.playerController.ended) ||
+      // the player is getting past damaged video and will carry on playing
+      this.playerController.dataset.recovering == "true"
+    );
+  }
+
+  // getting past damaged video; its time jumps when it is back
+  isRecovering(): boolean {
+    return this.playerController.dataset.recovering == "true";
+  }
+
+  // the recording timestamp shown right now
+  getTimestamp(): number {
+    return this.getProgress(
+      this.playerController.currentTime + this.inpointOffset,
+    );
   }
 
   // enough is buffered to keep playing

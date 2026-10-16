@@ -91,15 +91,28 @@ import { HISTORY_GRID_PRESETS } from "@/utils/cameraGridUtil";
 
 const DATA_REFRESH_TIME = 600000; // 10 minutes
 // grid cameras catch up with the main camera by playing a little faster or
-// slower; only further off than this are they seeked, which means rebuffering
+// slower; further behind than this they are seeked, which means rebuffering
 const GRID_SEEK_DRIFT_SECONDS = 2;
-// below this the difference is not visible and the speed is left alone
-const GRID_IN_SYNC_SECONDS = 0.15;
-// most a grid camera's speed is changed to catch up, as a fraction
-const GRID_MAX_RATE_NUDGE = 0.1;
+// a camera ahead by up to this much (often after skipping damaged video)
+// waits for the main camera instead of being seeked back into the damage
+const GRID_WAIT_AHEAD_SECONDS = 15;
+// speed changes kick in past the first and stop below the second, so the
+// speed is not changed back and forth
+const GRID_NUDGE_START_SECONDS = 0.3;
+const GRID_NUDGE_STOP_SECONDS = 0.08;
+// speed change while catching up: small differences, then larger ones
+const GRID_SMALL_NUDGE = 0.05;
+const GRID_LARGE_NUDGE = 0.1;
+const GRID_LARGE_NUDGE_SECONDS = 1;
+// a paused grid is lined up to within this
+const GRID_PAUSED_ALIGN_SECONDS = 0.1;
 // a grid camera that has not shown a frame this long after a seek is seeked again
 const GRID_SEEK_RETRY_MS = 10000;
+// a seeked camera is not seeked again for this long
+const GRID_SEEK_SETTLE_MS = 1500;
 const GRID_SYNC_INTERVAL_MS = 500;
+// a main camera this far behind the others after it got stuck jumps ahead
+const GRID_MAIN_REJOIN_SECONDS = 1;
 
 type RecordingViewProps = {
   startCamera: string;
@@ -188,6 +201,11 @@ export function RecordingView({
   );
   const gridCameraTimes = useRef<{ [camera: string]: number }>({});
   const gridSeekedAt = useRef<{ [camera: string]: number }>({});
+  // per grid camera: the speed change it plays with now, and whether it waits
+  const gridNudge = useRef<{ [camera: string]: number }>({});
+  const gridWaiting = useRef<{ [camera: string]: boolean }>({});
+  // the main camera got stuck (rebuffering or getting past damaged video)
+  const gridMainStuck = useRef(false);
   const mainCameraTime = useRef(startTime);
   // the main camera's own speed, which the grid cameras follow
   const gridBaseRate = useRef(1);
@@ -203,6 +221,8 @@ export function RecordingView({
     ) => {
       gridSeekedAt.current[camera] = Date.now();
       delete gridCameraTimes.current[camera];
+      delete gridWaiting.current[camera];
+      gridNudge.current[camera] = 0;
       controller.setPlaybackRate(gridBaseRate.current);
       controller.seekToTimestamp(time, play);
     },
@@ -572,7 +592,51 @@ export function RecordingView({
         return;
       }
 
-      const time = mainCameraTime.current;
+      // while the main camera is stuck the others play on at the chosen
+      // speed, so one bad recording does not stall the whole grid
+      if (main.isRecovering() || (main.isPlaying() && !main.isReady())) {
+        gridMainStuck.current = true;
+        gridCameras.forEach((camera) => {
+          const controller = gridControllers.current[camera];
+
+          if (camera != mainCamera && controller) {
+            gridNudge.current[camera] = 0;
+            delete gridWaiting.current[camera];
+            controller.setPlaybackRate(gridBaseRate.current);
+          }
+        });
+        return;
+      }
+
+      // when it plays again it jumps to where the others are
+      if (gridMainStuck.current) {
+        gridMainStuck.current = false;
+        const mainTime = main.getTimestamp();
+        const others = gridCameras
+          .filter((camera) => camera != mainCamera)
+          .map((camera) => gridControllers.current[camera])
+          .filter(
+            (controller): controller is DynamicVideoController =>
+              controller != undefined &&
+              controller.isPlaying() &&
+              controller.isReady(),
+          )
+          .map((controller) => controller.getTimestamp())
+          .sort((a, b) => a - b);
+
+        if (others.length > 0) {
+          const median = others[Math.floor(others.length / 2)];
+
+          if (median - mainTime > GRID_MAIN_REJOIN_SECONDS) {
+            mainCameraTime.current = median;
+            main.seekToTimestamp(median, true);
+            return;
+          }
+        }
+      }
+
+      // read the players directly: the reported times lag by up to 250 ms
+      const time = main.getTimestamp() || mainCameraTime.current;
       const playing = main.isPlaying();
       const rate = main.getPlaybackRate();
       const now = Date.now();
@@ -598,11 +662,9 @@ export function RecordingView({
           return;
         }
 
-        const cameraTime = gridCameraTimes.current[camera];
-
         // still loading after a seek or at the start: let it load, and only
         // try again if it never shows a frame
-        if (cameraTime == undefined) {
+        if (gridCameraTimes.current[camera] == undefined) {
           const seekedAt = gridSeekedAt.current[camera];
 
           if (seekedAt != undefined && now - seekedAt > GRID_SEEK_RETRY_MS) {
@@ -614,10 +676,36 @@ export function RecordingView({
           return;
         }
 
-        const drift = cameraTime - time;
+        const drift = controller.getTimestamp() - time;
+        const settling =
+          now - (gridSeekedAt.current[camera] ?? 0) < GRID_SEEK_SETTLE_MS;
+
+        // ahead: hold still until the main camera gets there
+        if (
+          gridWaiting.current[camera] ||
+          (drift > GRID_SEEK_DRIFT_SECONDS && drift < GRID_WAIT_AHEAD_SECONDS)
+        ) {
+          if (
+            drift > GRID_NUDGE_STOP_SECONDS &&
+            drift < GRID_WAIT_AHEAD_SECONDS
+          ) {
+            gridWaiting.current[camera] = true;
+
+            if (controller.isPlaying()) {
+              controller.pause();
+            }
+
+            return;
+          }
+
+          delete gridWaiting.current[camera];
+        }
 
         if (Math.abs(drift) > GRID_SEEK_DRIFT_SECONDS) {
-          seekGridCamera(camera, controller, time, playing);
+          if (!settling) {
+            seekGridCamera(camera, controller, time, playing);
+          }
+
           return;
         }
 
@@ -626,19 +714,32 @@ export function RecordingView({
             controller.pause();
           }
 
+          gridNudge.current[camera] = 0;
           controller.setPlaybackRate(rate);
+
+          if (Math.abs(drift) > GRID_PAUSED_ALIGN_SECONDS && !settling) {
+            seekGridCamera(camera, controller, time, false);
+          }
+
           return;
         }
 
-        // ahead plays slower, behind plays faster, in step plays as the main
-        const nudge =
-          Math.abs(drift) < GRID_IN_SYNC_SECONDS
-            ? 0
-            : Math.max(
-                -GRID_MAX_RATE_NUDGE,
-                Math.min(GRID_MAX_RATE_NUDGE, drift / 2),
-              );
-        controller.setPlaybackRate(rate * (1 - nudge));
+        // ahead plays slower, behind faster; with a gap between starting
+        // and stopping so the speed is not flipped every tick
+        let nudge = gridNudge.current[camera] ?? 0;
+
+        if (Math.abs(drift) > GRID_NUDGE_START_SECONDS) {
+          const size =
+            Math.abs(drift) > GRID_LARGE_NUDGE_SECONDS
+              ? GRID_LARGE_NUDGE
+              : GRID_SMALL_NUDGE;
+          nudge = drift > 0 ? -size : size;
+        } else if (Math.abs(drift) < GRID_NUDGE_STOP_SECONDS) {
+          nudge = 0;
+        }
+
+        gridNudge.current[camera] = nudge;
+        controller.setPlaybackRate(rate * (1 + nudge));
 
         if (!controller.isPlaying() && controller.isReady()) {
           controller.play();
