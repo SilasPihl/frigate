@@ -5,10 +5,13 @@ import "react-resizable/css/styles.css";
 import { useTranslation } from "react-i18next";
 import {
   LuCheck,
+  LuKeyboard,
   LuLayoutDashboard,
   LuMaximize2,
   LuMinimize2,
   LuMove,
+  LuVolume2,
+  LuVolumeX,
 } from "react-icons/lu";
 import { useResizeObserver } from "@/hooks/resize-observer";
 import { cn } from "@/lib/utils";
@@ -25,6 +28,11 @@ import {
 } from "@/utils/cameraGridUtil";
 import { CameraNameLabel } from "@/components/camera/FriendlyNameLabel";
 import { Button } from "@/components/ui/button";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   Tooltip,
@@ -185,7 +193,64 @@ export function HistoryLayoutPicker({
             : t("editLayout.label", { ns: "views/live" })}
         </Button>
       )}
+      <HistoryShortcuts />
     </div>
+  );
+}
+
+const SHORTCUTS: { keys: string[]; label: string }[] = [
+  { keys: ["Space"], label: "playPause" },
+  { keys: ["←", "→"], label: "seek10" },
+  { keys: ["Shift", "←", "→"], label: "seek60" },
+  { keys: ["↑", "↓"], label: "seek1" },
+  { keys: ["M"], label: "mute" },
+  { keys: ["F"], label: "fullscreen" },
+  { keys: ["1"], label: "single" },
+  { keys: ["2", "3", "4"], label: "presets" },
+  { keys: ["E"], label: "edit" },
+  { keys: ["Esc"], label: "escape" },
+];
+
+function HistoryShortcuts() {
+  const { t } = useTranslation(["views/events"]);
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          className="rounded-lg"
+          size="sm"
+          aria-label={t("grid.shortcuts.title")}
+          title={t("grid.shortcuts.title")}
+        >
+          <LuKeyboard className="size-4" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-80" align="end">
+        <div className="mb-2 text-sm font-medium text-primary">
+          {t("grid.shortcuts.title")}
+        </div>
+        <div className="grid grid-cols-[auto_1fr] items-center gap-x-4 gap-y-1.5 text-sm">
+          {SHORTCUTS.map((shortcut) => (
+            <div key={shortcut.label} className="contents">
+              <div className="flex gap-1">
+                {shortcut.keys.map((key) => (
+                  <kbd
+                    key={key}
+                    className="rounded border border-secondary-highlight bg-secondary px-1.5 py-0.5 font-mono text-xs text-primary"
+                  >
+                    {key}
+                  </kbd>
+                ))}
+              </div>
+              <div className="text-secondary-foreground">
+                {t(`grid.shortcuts.${shortcut.label}`)}
+              </div>
+            </div>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -199,6 +264,8 @@ type HistoryGridLayoutProps = {
   onSelectCamera: (camera: string) => void;
   onEnlargeCamera: (camera: string | undefined) => void;
   onSwapCameras: (first: string, second: string) => void;
+  audibleCameras: string[];
+  onToggleAudio: (camera: string) => void;
   renderCamera: (camera: string, isMain: boolean) => ReactNode;
 };
 export default function HistoryGridLayout({
@@ -211,6 +278,8 @@ export default function HistoryGridLayout({
   onSelectCamera,
   onEnlargeCamera,
   onSwapCameras,
+  audibleCameras,
+  onToggleAudio,
   renderCamera,
 }: HistoryGridLayoutProps) {
   const { t } = useTranslation(["views/events"]);
@@ -362,6 +431,42 @@ export default function HistoryGridLayout({
                       camera={camera}
                       className="pointer-events-none absolute bottom-2 left-2 z-30 rounded-md bg-black/60 px-2 py-0.5 text-xs text-white smart-capitalize"
                     />
+                    {!isMain && !editing && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            className={cn(
+                              "absolute right-20 top-2 z-30 rounded-md bg-black/60 p-1.5 text-white transition-opacity focus:opacity-100",
+                              audibleCameras.includes(camera)
+                                ? "opacity-100"
+                                : "opacity-0 group-hover:opacity-100",
+                            )}
+                            aria-pressed={audibleCameras.includes(camera)}
+                            aria-label={
+                              audibleCameras.includes(camera)
+                                ? t("grid.mute")
+                                : t("grid.unmute")
+                            }
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onToggleAudio(camera);
+                            }}
+                          >
+                            {audibleCameras.includes(camera) ? (
+                              <LuVolume2 className="size-4" />
+                            ) : (
+                              <LuVolumeX className="size-4" />
+                            )}
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          {audibleCameras.includes(camera)
+                            ? t("grid.mute")
+                            : t("grid.unmute")}
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
                     {canSwap && (
                       <Tooltip>
                         <TooltipTrigger asChild>

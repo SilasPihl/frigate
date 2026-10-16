@@ -29,7 +29,22 @@
     "swap": "Drag onto another camera to swap them",
     "doneEditing": "Done",
     "editShortcut": "Move and resize cameras (E)",
-    "editHint": "Drag a camera to move it, drag a corner to resize it. Press Esc when done."
+    "editHint": "Drag a camera to move it, drag a corner to resize it. Press Esc when done.",
+    "unmute": "Play this camera's sound too",
+    "mute": "Mute this camera",
+    "shortcuts": {
+      "title": "Keyboard shortcuts",
+      "playPause": "Play or pause",
+      "seek10": "Back or forward 10 seconds",
+      "seek60": "Back or forward 1 minute",
+      "seek1": "Back or forward 1 second",
+      "mute": "Sound on the main camera",
+      "fullscreen": "Fullscreen",
+      "single": "One camera",
+      "presets": "Quick layouts 2×2, 3×2, 2×3",
+      "edit": "Move and resize cameras",
+      "escape": "Done editing, or back to the grid"
+    }
   },
   "zoomIn": "Zoom In",
   "zoomOut": "Zoom Out",

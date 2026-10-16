@@ -174,6 +174,8 @@ export function RecordingView({
   const gridActive = isDesktop && historyGrid.mode == "grid";
   const [isGridEditMode, setIsGridEditMode] = useState(false);
   const [enlargedCamera, setEnlargedCamera] = useState<string>();
+  // grid cameras besides the main one that play their sound
+  const [audibleCameras, setAudibleCameras] = useState<string[]>([]);
   const gridControllers = useRef<{ [camera: string]: DynamicVideoController }>(
     {},
   );
@@ -1127,6 +1129,14 @@ export function RecordingView({
                 onSelectCamera={onSelectGridCamera}
                 onEnlargeCamera={onEnlargeGridCamera}
                 onSwapCameras={historyGrid.swapCameras}
+                audibleCameras={audibleCameras}
+                onToggleAudio={(camera) =>
+                  setAudibleCameras((current) =>
+                    current.includes(camera)
+                      ? current.filter((c) => c != camera)
+                      : [...current, camera],
+                  )
+                }
                 renderCamera={(camera, isMain) => (
                   <DynamicVideoPlayer
                     key={camera}
@@ -1141,6 +1151,7 @@ export function RecordingView({
                       debugReplayMode != "select"
                     }
                     follower={!isMain}
+                    followerMuted={!audibleCameras.includes(camera)}
                     fullscreen={fullscreen}
                     onTimestampUpdate={
                       isMain
