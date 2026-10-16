@@ -43,6 +43,12 @@ export type RecordingStartingPoint = {
   navigationSource?: "shared-link";
 };
 
+// where the recording page is when it hands a change back to its parent
+export type RecordingPosition = {
+  camera: string;
+  time: number;
+};
+
 export type RecordingPlayerError = "stalled" | "startup";
 
 export const ASPECT_VERTICAL_LAYOUT = 1.5;

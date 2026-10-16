@@ -25,7 +25,11 @@
     "preset": "{{columns}} wide, {{rows}} high, the rest small below",
     "custom": "Custom",
     "enlarge": "Enlarge",
-    "backToGrid": "Back to grid"
+    "backToGrid": "Back to grid",
+    "swap": "Drag onto another camera to swap them",
+    "doneEditing": "Done",
+    "editShortcut": "Move and resize cameras (E)",
+    "editHint": "Drag a camera to move it, drag a corner to resize it. Press Esc when done."
   },
   "zoomIn": "Zoom In",
   "zoomOut": "Zoom Out",

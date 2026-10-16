@@ -57,6 +57,7 @@ import { VideoResolutionType } from "@/types/live";
 import {
   ASPECT_VERTICAL_LAYOUT,
   ASPECT_WIDE_LAYOUT,
+  RecordingPosition,
   RecordingSegment,
   RecordingStartingPoint,
 } from "@/types/record";
@@ -83,6 +84,8 @@ import { shareOrCopy } from "@/utils/browserUtil";
 import { createRecordingReviewUrl } from "@/utils/recordingReviewUrl";
 import HistoryGridLayout, { HistoryLayoutPicker } from "./HistoryGridLayout";
 import { useHistoryGrid } from "@/hooks/use-history-grid";
+import useKeyboardListener from "@/hooks/use-keyboard-listener";
+import { HISTORY_GRID_PRESETS } from "@/utils/cameraGridUtil";
 
 const DATA_REFRESH_TIME = 600000; // 10 minutes
 // grid cameras further than this from the main camera are seeked back
@@ -100,7 +103,7 @@ type RecordingViewProps = {
   allCameras: string[];
   allPreviews?: Preview[];
   filter?: ReviewFilter;
-  updateFilter: (newFilter: ReviewFilter) => void;
+  updateFilter: (newFilter: ReviewFilter, position?: RecordingPosition) => void;
   refreshData?: () => void;
   onMotionSearch?: (camera: string) => void;
 };
@@ -607,6 +610,63 @@ export function RecordingView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrubbing]);
 
+  const selectSingleLayout = useCallback(() => {
+    setPlaybackStart(currentTime);
+    historyGrid.showSingle();
+  }, [currentTime, historyGrid]);
+
+  const selectGridPreset = useCallback(
+    (preset: (typeof HISTORY_GRID_PRESETS)[number]["id"]) => {
+      if (!gridActive) {
+        setPlaybackStart(currentTime);
+      }
+
+      setEnlargedCamera(undefined);
+      historyGrid.applyPreset(preset, mainCamera);
+    },
+    [currentTime, gridActive, historyGrid, mainCamera],
+  );
+
+  // 1 = one camera, 2-4 = the quick layouts, e = edit the grid
+  useKeyboardListener(["1", "2", "3", "4", "e"], (key, modifiers) => {
+    if (
+      !key ||
+      !modifiers.down ||
+      modifiers.repeat ||
+      modifiers.ctrl ||
+      !isDesktop ||
+      gridCameras.length < 2 ||
+      !historyGrid.loaded
+    ) {
+      return false;
+    }
+
+    if (key == "e") {
+      if (!gridActive) {
+        return false;
+      }
+
+      setEnlargedCamera(undefined);
+      setIsGridEditMode(!isGridEditMode);
+    } else if (key == "1") {
+      selectSingleLayout();
+    } else {
+      selectGridPreset(HISTORY_GRID_PRESETS[Number(key) - 2].id);
+    }
+
+    return true;
+  });
+
+  // in the grid the timeline marks what happened on every camera shown
+  const timelineReviewItems = useMemo(
+    () =>
+      gridActive
+        ? (reviewItems?.filter((item) => gridCameras.includes(item.camera)) ??
+          [])
+        : mainCameraReviewItems,
+    [gridActive, gridCameras, reviewItems, mainCameraReviewItems],
+  );
+
   // fullscreen
 
   const { fullscreen, toggleFullscreen, supportsFullScreen } =
@@ -838,18 +898,13 @@ export function RecordingView({
               <HistoryLayoutPicker
                 mode={historyGrid.mode}
                 preset={historyGrid.preset}
-                onSelectSingle={() => {
-                  setPlaybackStart(currentTime);
-                  historyGrid.showSingle();
-                }}
-                onSelectPreset={(preset) => {
-                  if (!gridActive) {
-                    setPlaybackStart(currentTime);
-                  }
-
+                isEditMode={isGridEditMode}
+                setIsEditMode={(editing) => {
                   setEnlargedCamera(undefined);
-                  historyGrid.applyPreset(preset, mainCamera);
+                  setIsGridEditMode(editing);
                 }}
+                onSelectSingle={selectSingleLayout}
+                onSelectPreset={selectGridPreset}
               />
             )}
             <MobileCameraDrawer
@@ -918,7 +973,10 @@ export function RecordingView({
                     ...newFilter,
                     cameras: updatedCameras,
                   };
-                  updateFilter(adjustedFilter);
+                  updateFilter(adjustedFilter, {
+                    camera: mainCamera,
+                    time: currentTime,
+                  });
                 }}
                 setMotionOnly={() => {}}
               />
@@ -1068,6 +1126,7 @@ export function RecordingView({
                 onSaveLayout={historyGrid.saveLayout}
                 onSelectCamera={onSelectGridCamera}
                 onEnlargeCamera={onEnlargeGridCamera}
+                onSwapCameras={historyGrid.swapCameras}
                 renderCamera={(camera, isMain) => (
                   <DynamicVideoPlayer
                     key={camera}
@@ -1253,6 +1312,8 @@ export function RecordingView({
             }
             timeRange={timeRange}
             mainCameraReviewItems={mainCameraReviewItems}
+            timelineReviewItems={timelineReviewItems}
+            motionCameras={gridActive ? gridCameras.join(",") : mainCamera}
             activeReviewItem={activeReviewItem}
             currentTime={currentTime}
             exportRange={
@@ -1286,6 +1347,10 @@ type TimelineProps = {
   timelineType: TimelineType;
   timeRange: TimeRange;
   mainCameraReviewItems: ReviewSegment[];
+  // review items and motion shown on the timeline; more than the main
+  // camera's when History shows a grid
+  timelineReviewItems: ReviewSegment[];
+  motionCameras: string;
   activeReviewItem?: ReviewSegment;
   currentTime: number;
   exportRange?: TimeRange;
@@ -1303,6 +1368,8 @@ function Timeline({
   timelineType,
   timeRange,
   mainCameraReviewItems,
+  timelineReviewItems,
+  motionCameras,
   activeReviewItem,
   currentTime,
   exportRange,
@@ -1372,7 +1439,7 @@ function Timeline({
       before: alignedBefore,
       after: alignedAfter,
       scale: Math.round(zoomSettings.segmentDuration / 2),
-      cameras: mainCamera,
+      cameras: motionCameras,
     },
   ]);
 
@@ -1480,7 +1547,7 @@ function Timeline({
             setExportEndTime={setExportEndTime}
             handlebarTime={currentTime}
             setHandlebarTime={setCurrentTime}
-            events={mainCameraReviewItems}
+            events={timelineReviewItems}
             motion_events={motionData ?? []}
             noRecordingRanges={noRecordings ?? []}
             contentRef={contentRef}
@@ -1511,12 +1578,12 @@ function Timeline({
               isMobile && "sm:portrait:grid-cols-2",
             )}
           >
-            {mainCameraReviewItems.length === 0 ? (
+            {timelineReviewItems.length === 0 ? (
               <div className="mt-5 text-center text-primary">
                 {t("events.noFoundForTimePeriod")}
               </div>
             ) : (
-              mainCameraReviewItems.map((review) => {
+              timelineReviewItems.map((review) => {
                 if (review.severity === "significant_motion") {
                   return;
                 }

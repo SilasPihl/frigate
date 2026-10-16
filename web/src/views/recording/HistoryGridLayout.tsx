@@ -1,10 +1,15 @@
-import { ReactNode, useEffect, useMemo, useRef } from "react";
+import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { GridLayout, Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 import { useTranslation } from "react-i18next";
-import { IoClose } from "react-icons/io5";
-import { LuLayoutDashboard, LuMaximize2, LuMinimize2 } from "react-icons/lu";
+import {
+  LuCheck,
+  LuLayoutDashboard,
+  LuMaximize2,
+  LuMinimize2,
+  LuMove,
+} from "react-icons/lu";
 import { useResizeObserver } from "@/hooks/resize-observer";
 import { cn } from "@/lib/utils";
 import CornerCircles from "@/components/grid/CornerCircles";
@@ -19,6 +24,7 @@ import {
   smallRow,
 } from "@/utils/cameraGridUtil";
 import { CameraNameLabel } from "@/components/camera/FriendlyNameLabel";
+import { Button } from "@/components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   Tooltip,
@@ -28,6 +34,8 @@ import {
 
 // gap between tiles, in px
 const GRID_MARGIN = 8;
+// drag-and-drop type for swapping two cameras
+const CAMERA_DRAG_TYPE = "application/x-frigate-camera";
 
 function PresetIcon({ columns, rows }: { columns: number; rows: number }) {
   const width = 18;
@@ -76,16 +84,20 @@ function PresetIcon({ columns, rows }: { columns: number; rows: number }) {
 type HistoryLayoutPickerProps = {
   mode: "single" | "grid";
   preset: HistoryGridPreset | null;
+  isEditMode: boolean;
+  setIsEditMode: (editing: boolean) => void;
   onSelectSingle: () => void;
   onSelectPreset: (preset: HistoryGridPreset) => void;
 };
 export function HistoryLayoutPicker({
   mode,
   preset,
+  isEditMode,
+  setIsEditMode,
   onSelectSingle,
   onSelectPreset,
 }: HistoryLayoutPickerProps) {
-  const { t } = useTranslation(["views/events"]);
+  const { t } = useTranslation(["views/events", "views/live"]);
   const value = mode == "single" ? "single" : (preset ?? "");
 
   return (
@@ -112,7 +124,7 @@ export function HistoryLayoutPicker({
           className={cn(value != "single" && "text-muted-foreground")}
           value="single"
           aria-label={t("grid.single")}
-          title={t("grid.single")}
+          title={`${t("grid.single")} (1)`}
         >
           <svg
             viewBox="0 0 18 14"
@@ -134,13 +146,13 @@ export function HistoryLayoutPicker({
           </svg>
           <span className="ml-1.5">1</span>
         </ToggleGroupItem>
-        {HISTORY_GRID_PRESETS.map((p) => (
+        {HISTORY_GRID_PRESETS.map((p, index) => (
           <ToggleGroupItem
             key={p.id}
             className={cn(value != p.id && "text-muted-foreground")}
             value={p.id}
             aria-label={t("grid.preset", { columns: p.columns, rows: p.rows })}
-            title={t("grid.preset", { columns: p.columns, rows: p.rows })}
+            title={`${t("grid.preset", { columns: p.columns, rows: p.rows })} (${index + 2})`}
           >
             <PresetIcon columns={p.columns} rows={p.rows} />
             <span className="ml-1.5">
@@ -153,6 +165,25 @@ export function HistoryLayoutPicker({
         <div className="rounded-md bg-secondary px-2.5 py-1.5 text-sm text-primary">
           {t("grid.custom")}
         </div>
+      )}
+      {mode == "grid" && (
+        <Button
+          className="flex items-center gap-2 rounded-lg"
+          size="sm"
+          variant={isEditMode ? "select" : "default"}
+          aria-pressed={isEditMode}
+          title={t("grid.editShortcut")}
+          onClick={() => setIsEditMode(!isEditMode)}
+        >
+          {isEditMode ? (
+            <LuCheck className="size-4" />
+          ) : (
+            <LuLayoutDashboard className="size-4" />
+          )}
+          {isEditMode
+            ? t("grid.doneEditing")
+            : t("editLayout.label", { ns: "views/live" })}
+        </Button>
       )}
     </div>
   );
@@ -167,6 +198,7 @@ type HistoryGridLayoutProps = {
   onSaveLayout: (layout: Layout) => void;
   onSelectCamera: (camera: string) => void;
   onEnlargeCamera: (camera: string | undefined) => void;
+  onSwapCameras: (first: string, second: string) => void;
   renderCamera: (camera: string, isMain: boolean) => ReactNode;
 };
 export default function HistoryGridLayout({
@@ -178,9 +210,14 @@ export default function HistoryGridLayout({
   onSaveLayout,
   onSelectCamera,
   onEnlargeCamera,
+  onSwapCameras,
   renderCamera,
 }: HistoryGridLayoutProps) {
-  const { t } = useTranslation(["views/events", "views/live"]);
+  const { t } = useTranslation(["views/events"]);
+
+  // swapping by drag-and-drop works without edit mode
+  const [draggedCamera, setDraggedCamera] = useState<string>();
+  const [dropCamera, setDropCamera] = useState<string>();
 
   // while a camera is enlarged it fills the width, the others sit small below
   const shownLayout = useMemo(() => {
@@ -272,6 +309,8 @@ export default function HistoryGridLayout({
               const isMain = camera == mainCamera;
               const isEnlarged = camera == enlargedCamera;
 
+              const canSwap = !editing && !enlargedCamera;
+
               return (
                 <div key={camera} className="group">
                   <div
@@ -282,10 +321,39 @@ export default function HistoryGridLayout({
                         "outline outline-2 outline-selected",
                       editing &&
                         "outline outline-2 outline-muted-foreground hover:cursor-grab hover:outline-4 active:cursor-grabbing",
+                      draggedCamera == camera && "opacity-50",
+                      dropCamera == camera &&
+                        draggedCamera != camera &&
+                        "outline-dashed outline-4 outline-selected",
                     )}
                     onClick={() => {
                       if (!editing && !isMain) {
                         onSelectCamera(camera);
+                      }
+                    }}
+                    onDragOver={(e) => {
+                      if (
+                        canSwap &&
+                        e.dataTransfer.types.includes(CAMERA_DRAG_TYPE)
+                      ) {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                        setDropCamera(camera);
+                      }
+                    }}
+                    onDragLeave={() =>
+                      setDropCamera((current) =>
+                        current == camera ? undefined : current,
+                      )
+                    }
+                    onDrop={(e) => {
+                      const source = e.dataTransfer.getData(CAMERA_DRAG_TYPE);
+                      e.preventDefault();
+                      setDropCamera(undefined);
+                      setDraggedCamera(undefined);
+
+                      if (source && source != camera) {
+                        onSwapCameras(source, camera);
                       }
                     }}
                   >
@@ -294,6 +362,39 @@ export default function HistoryGridLayout({
                       camera={camera}
                       className="pointer-events-none absolute bottom-2 left-2 z-30 rounded-md bg-black/60 px-2 py-0.5 text-xs text-white smart-capitalize"
                     />
+                    {canSwap && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <div
+                            draggable
+                            role="button"
+                            tabIndex={-1}
+                            className="absolute right-11 top-2 z-30 cursor-grab rounded-md bg-black/60 p-1.5 text-white opacity-0 transition-opacity group-hover:opacity-100 active:cursor-grabbing"
+                            aria-label={t("grid.swap")}
+                            onClick={(e) => e.stopPropagation()}
+                            onDragStart={(e) => {
+                              e.dataTransfer.setData(CAMERA_DRAG_TYPE, camera);
+                              e.dataTransfer.effectAllowed = "move";
+                              const tile =
+                                e.currentTarget.closest(".react-grid-item");
+
+                              if (tile) {
+                                e.dataTransfer.setDragImage(tile, 40, 30);
+                              }
+
+                              setDraggedCamera(camera);
+                            }}
+                            onDragEnd={() => {
+                              setDraggedCamera(undefined);
+                              setDropCamera(undefined);
+                            }}
+                          >
+                            <LuMove className="size-4" />
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent>{t("grid.swap")}</TooltipContent>
+                      </Tooltip>
+                    )}
                     {!editing && (
                       <Tooltip>
                         <TooltipTrigger asChild>
@@ -333,32 +434,10 @@ export default function HistoryGridLayout({
           </GridLayout>
         </div>
       )}
-      {!enlargedCamera && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              className="absolute bottom-2 right-2 z-50 cursor-pointer rounded-lg bg-secondary text-secondary-foreground opacity-60 transition-all duration-300 hover:bg-muted hover:opacity-100"
-              aria-label={
-                isEditMode
-                  ? t("editLayout.exitEdit", { ns: "views/live" })
-                  : t("editLayout.label", { ns: "views/live" })
-              }
-              onClick={() => setIsEditMode(!isEditMode)}
-            >
-              {isEditMode ? (
-                <IoClose className="m-[6px] size-5" />
-              ) : (
-                <LuLayoutDashboard className="m-[6px] size-5" />
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>
-            {isEditMode
-              ? t("editLayout.exitEdit", { ns: "views/live" })
-              : t("editLayout.label", { ns: "views/live" })}
-          </TooltipContent>
-        </Tooltip>
+      {editing && (
+        <div className="pointer-events-none absolute left-1/2 top-2 z-50 -translate-x-1/2 rounded-lg bg-secondary/90 px-3 py-1.5 text-sm text-primary shadow">
+          {t("grid.editHint")}
+        </div>
       )}
     </div>
   );
