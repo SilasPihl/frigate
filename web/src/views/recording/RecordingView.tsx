@@ -29,6 +29,7 @@ import {
 import { findChunkIndex, getChunkedTimeDay } from "@/utils/timelineUtil";
 import {
   MutableRefObject,
+  ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -58,6 +59,7 @@ import {
   ASPECT_VERTICAL_LAYOUT,
   ASPECT_WIDE_LAYOUT,
   RecordingPosition,
+  Recording,
   RecordingSegment,
   RecordingStartingPoint,
 } from "@/types/record";
@@ -1308,51 +1310,57 @@ export function RecordingView({
                       )
                     }
                     renderCamera={(camera, isMain) => (
-                      <DynamicVideoPlayer
-                        key={camera}
-                        className="size-full"
+                      <GridRecordingsGate
                         camera={camera}
                         timeRange={currentTimeRange}
-                        cameraPreviews={allPreviews ?? []}
-                        startTimestamp={playbackStart}
-                        hotKeys={
-                          isMain &&
-                          exportMode != "select" &&
-                          debugReplayMode != "select"
-                        }
-                        follower={!isMain}
-                        followerMuted={!audibleCameras.includes(camera)}
-                        fullscreen={fullscreen}
-                        onTimestampUpdate={
-                          isMain
-                            ? onMainTimestampUpdate
-                            : (timestamp) => {
-                                gridCameraTimes.current[camera] = timestamp;
-                              }
-                        }
-                        onClipEnded={isMain ? onClipEnded : undefined}
-                        onClipPrevious={isMain ? onClipPrevious : undefined}
-                        onSeekToTime={manuallySetCurrentTime}
-                        onControllerReady={(controller) => {
-                          gridControllers.current[camera] = controller;
-
-                          if (isMain) {
-                            mainControllerRef.current = controller;
+                        isMain={isMain}
+                      >
+                        <DynamicVideoPlayer
+                          key={camera}
+                          className="size-full"
+                          camera={camera}
+                          timeRange={currentTimeRange}
+                          cameraPreviews={allPreviews ?? []}
+                          startTimestamp={playbackStart}
+                          hotKeys={
+                            isMain &&
+                            exportMode != "select" &&
+                            debugReplayMode != "select"
                           }
-                        }}
-                        isScrubbing={
-                          scrubbing ||
-                          exportMode == "timeline" ||
-                          exportMode == "timeline_multi" ||
-                          debugReplayMode == "timeline"
-                        }
-                        supportsFullscreen={supportsFullScreen}
-                        setFullResolution={
-                          isMain ? setFullResolution : ignoreFullResolution
-                        }
-                        toggleFullscreen={toggleFullscreen}
-                        containerRef={mainLayoutRef}
-                      />
+                          follower={!isMain}
+                          followerMuted={!audibleCameras.includes(camera)}
+                          fullscreen={fullscreen}
+                          onTimestampUpdate={
+                            isMain
+                              ? onMainTimestampUpdate
+                              : (timestamp) => {
+                                  gridCameraTimes.current[camera] = timestamp;
+                                }
+                          }
+                          onClipEnded={isMain ? onClipEnded : undefined}
+                          onClipPrevious={isMain ? onClipPrevious : undefined}
+                          onSeekToTime={manuallySetCurrentTime}
+                          onControllerReady={(controller) => {
+                            gridControllers.current[camera] = controller;
+
+                            if (isMain) {
+                              mainControllerRef.current = controller;
+                            }
+                          }}
+                          isScrubbing={
+                            scrubbing ||
+                            exportMode == "timeline" ||
+                            exportMode == "timeline_multi" ||
+                            debugReplayMode == "timeline"
+                          }
+                          supportsFullscreen={supportsFullScreen}
+                          setFullResolution={
+                            isMain ? setFullResolution : ignoreFullResolution
+                          }
+                          toggleFullscreen={toggleFullscreen}
+                          containerRef={mainLayoutRef}
+                        />
+                      </GridRecordingsGate>
                     )}
                   />
                 </div>
@@ -1540,6 +1548,43 @@ export function RecordingView({
       </div>
     </DetailStreamProvider>
   );
+}
+
+type GridRecordingsGateProps = {
+  camera: string;
+  timeRange: TimeRange;
+  isMain: boolean;
+  children: ReactNode;
+};
+// a grid camera without any recordings in the hour (offline, or switched
+// off for a while) gets a note instead of a player that waits forever; the
+// main camera always keeps its player, which drives the clock
+function GridRecordingsGate({
+  camera,
+  timeRange,
+  isMain,
+  children,
+}: GridRecordingsGateProps) {
+  const { t } = useTranslation(["views/events"]);
+  // the same request the camera's player makes, so it comes from the cache
+  const recordingParams = useMemo(
+    () => ({ before: timeRange.before, after: timeRange.after }),
+    [timeRange],
+  );
+  const { data: recordings } = useSWR<Recording[]>(
+    [`${camera}/recordings`, recordingParams],
+    { revalidateOnFocus: false },
+  );
+
+  if (!isMain && recordings != undefined && recordings.length == 0) {
+    return (
+      <div className="flex size-full items-center justify-center bg-secondary p-2 text-center text-sm text-secondary-foreground">
+        {t("grid.noRecordings")}
+      </div>
+    );
+  }
+
+  return <>{children}</>;
 }
 
 type TimelineProps = {
