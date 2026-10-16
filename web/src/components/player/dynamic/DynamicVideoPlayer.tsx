@@ -44,6 +44,7 @@ type DynamicVideoPlayerProps = {
   startTimestamp?: number;
   isScrubbing: boolean;
   hotKeys: boolean;
+  follower?: boolean;
   supportsFullscreen: boolean;
   fullscreen: boolean;
   onControllerReady: (controller: DynamicVideoController) => void;
@@ -64,6 +65,7 @@ export default function DynamicVideoPlayer({
   startTimestamp,
   isScrubbing,
   hotKeys,
+  follower = false,
   supportsFullscreen,
   fullscreen,
   onControllerReady,
@@ -338,7 +340,8 @@ export default function DynamicVideoPlayer({
           containerRef={containerRef}
           visible={!(isScrubbing || isLoading)}
           currentSource={source}
-          hotKeys={hotKeys}
+          hotKeys={hotKeys && !follower}
+          follower={follower}
           supportsFullscreen={supportsFullscreen}
           fullscreen={fullscreen}
           inpointOffset={inpointOffset}

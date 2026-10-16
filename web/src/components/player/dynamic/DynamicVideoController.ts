@@ -74,6 +74,16 @@ export class DynamicVideoController {
     return !this.playerController.paused && !this.playerController.ended;
   }
 
+  getPlaybackRate(): number {
+    return this.playerController.playbackRate;
+  }
+
+  setPlaybackRate(rate: number) {
+    if (this.playerController.playbackRate != rate) {
+      this.playerController.playbackRate = rate;
+    }
+  }
+
   seekToTimestamp(time: number, play: boolean = false) {
     if (time < this.timeRange.after || time > this.timeRange.before) {
       this.timeToStart = time;
