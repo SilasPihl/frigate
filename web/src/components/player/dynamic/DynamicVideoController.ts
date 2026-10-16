@@ -63,7 +63,8 @@ export class DynamicVideoController {
   }
 
   play() {
-    this.playerController.play();
+    // a pause or seek right after interrupts the returned promise; that is fine
+    this.playerController.play()?.catch(() => {});
   }
 
   pause() {
@@ -72,6 +73,13 @@ export class DynamicVideoController {
 
   isPlaying(): boolean {
     return !this.playerController.paused && !this.playerController.ended;
+  }
+
+  // enough is buffered to keep playing
+  isReady(): boolean {
+    return (
+      this.playerController.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA
+    );
   }
 
   getPlaybackRate(): number {
