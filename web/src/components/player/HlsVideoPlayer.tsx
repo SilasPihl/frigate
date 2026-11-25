@@ -36,13 +36,6 @@ export interface HlsSource {
   startPosition?: number;
 }
 
-// how far past damaged video playback carries on: the first time, and then
-// each further time within DECODE_RECOVERY_WINDOW_MS
-const DECODE_RECOVERY_SKIP_SECONDS = [0.5, 1.5, 4, 8];
-const DECODE_RECOVERY_WINDOW_MS = 10_000;
-// past this the recording is too broken to keep trying and the error shows
-const DECODE_RECOVERY_LIMIT_PER_MINUTE = 12;
-
 type HlsVideoPlayerProps = {
   videoRef: MutableRefObject<HTMLVideoElement | null>;
   containerRef?: React.MutableRefObject<HTMLDivElement | null>;
@@ -52,10 +45,6 @@ type HlsVideoPlayerProps = {
   supportsFullscreen: boolean;
   fullscreen: boolean;
   frigateControls?: boolean;
-  // a control-less player that another player keeps in sync; muted unless
-  // followerMuted is false
-  follower?: boolean;
-  followerMuted?: boolean;
   inpointOffset?: number;
   onClipEnded?: (currentTime: number) => void;
   onClipPrevious?: (diff: number) => void;
@@ -84,8 +73,6 @@ export default function HlsVideoPlayer({
   supportsFullscreen,
   fullscreen,
   frigateControls = true,
-  follower = false,
-  followerMuted = true,
   inpointOffset = 0,
   onClipEnded,
   onClipPrevious,
@@ -115,58 +102,6 @@ export default function HlsVideoPlayer({
 
   const hlsRef = useRef<Hls>(undefined);
   const [useHlsCompat, setUseHlsCompat] = useState(false);
-
-  // damaged video in a recording (usually packets the camera lost) makes
-  // hardware decoders give up for good; reset the decoder and carry on just
-  // past the damage, jumping further when it happens again right away
-  const decodeRecoveries = useRef<number[]>([]);
-  const lastPlayingAt = useRef(0);
-
-  const recoverFromDecodeError = useCallback((): boolean => {
-    const hls = hlsRef.current;
-    const video = videoRef.current;
-
-    if (!hls || !video) {
-      return false;
-    }
-
-    const now = Date.now();
-    decodeRecoveries.current = decodeRecoveries.current.filter(
-      (at) => now - at < 60_000,
-    );
-
-    if (decodeRecoveries.current.length >= DECODE_RECOVERY_LIMIT_PER_MINUTE) {
-      return false;
-    }
-
-    const recent = decodeRecoveries.current.filter(
-      (at) => now - at < DECODE_RECOVERY_WINDOW_MS,
-    ).length;
-    decodeRecoveries.current.push(now);
-
-    const resumeAt =
-      video.currentTime +
-      DECODE_RECOVERY_SKIP_SECONDS[
-        Math.min(recent, DECODE_RECOVERY_SKIP_SECONDS.length - 1)
-      ];
-    const resume = now - lastPlayingAt.current < 2000;
-
-    if (resume) {
-      video.dataset.recovering = "true";
-    }
-
-    hls.once(Hls.Events.MEDIA_ATTACHED, () => {
-      video.currentTime = resumeAt;
-
-      if (resume) {
-        video.play().catch(() => {
-          delete video.dataset.recovering;
-        });
-      }
-    });
-    hls.recoverMediaError();
-    return true;
-  }, [videoRef]);
   const [loadedMetadata, setLoadedMetadata] = useState(false);
   const [bufferTimeout, setBufferTimeout] = useState<NodeJS.Timeout>();
 
@@ -377,9 +312,9 @@ export default function HlsVideoPlayer({
       minScale={1.0}
       wheel={{ smoothStep: 0.005 }}
       onZoom={(zoom) => setZoomScale(zoom.state.scale)}
-      disabled={!frigateControls || follower}
+      disabled={!frigateControls}
     >
-      {frigateControls && !follower && (
+      {frigateControls && (
         <VideoControls
           className={cn(
             "absolute left-1/2 z-50 -translate-x-1/2",
@@ -511,9 +446,9 @@ export default function HlsVideoPlayer({
             autoPlay
             controls={!frigateControls}
             playsInline
-            muted={follower ? followerMuted : muted}
+            muted={muted}
             onClick={
-              isDesktop && !follower
+              isDesktop
                 ? () => {
                     if (zoomScale == 1.0) onPlayPause(!isPlaying);
                   }
@@ -546,13 +481,7 @@ export default function HlsVideoPlayer({
                 );
               }
             }}
-            onPlaying={() => {
-              if (videoRef.current) {
-                delete videoRef.current.dataset.recovering;
-              }
-
-              onPlaying?.();
-            }}
+            onPlaying={onPlaying}
             onPause={() => {
               setIsPlaying(false);
               clearTimeout(bufferTimeout);
@@ -598,10 +527,6 @@ export default function HlsVideoPlayer({
               }
             }}
             onTimeUpdate={() => {
-              if (videoRef.current && !videoRef.current.paused) {
-                lastPlayingAt.current = Date.now();
-              }
-
               if (!onTimeUpdate) {
                 return;
               }
@@ -632,14 +557,6 @@ export default function HlsVideoPlayer({
               }
             }}
             onError={(e) => {
-              if (
-                hlsRef.current &&
-                videoRef.current?.error?.code == MediaError.MEDIA_ERR_DECODE &&
-                recoverFromDecodeError()
-              ) {
-                return;
-              }
-
               if (
                 !hlsRef.current &&
                 // @ts-expect-error code does exist

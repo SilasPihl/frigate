@@ -15,7 +15,7 @@ import {
 } from "react-icons/lu";
 import { useResizeObserver } from "@/hooks/resize-observer";
 import { cn } from "@/lib/utils";
-import CornerCircles from "@/components/grid/CornerCircles";
+import CornerCircles from "@/custom-history/CornerCircles";
 import {
   CAMERA_GRID_COLUMNS,
   GridItem,
@@ -25,7 +25,7 @@ import {
   keepAspectOnResize,
   layoutOrder,
   smallRow,
-} from "@/utils/cameraGridUtil";
+} from "@/custom-history/cameraGridUtil";
 import { CameraNameLabel } from "@/components/camera/FriendlyNameLabel";
 import { Button } from "@/components/ui/button";
 import {

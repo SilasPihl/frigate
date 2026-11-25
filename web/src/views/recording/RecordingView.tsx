@@ -29,7 +29,6 @@ import {
 import { findChunkIndex, getChunkedTimeDay } from "@/utils/timelineUtil";
 import {
   MutableRefObject,
-  ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -58,8 +57,6 @@ import { VideoResolutionType } from "@/types/live";
 import {
   ASPECT_VERTICAL_LAYOUT,
   ASPECT_WIDE_LAYOUT,
-  RecordingPosition,
-  Recording,
   RecordingSegment,
   RecordingStartingPoint,
 } from "@/types/record";
@@ -84,37 +81,8 @@ import {
 import ShareTimestampDialog from "@/components/overlay/ShareTimestampDialog";
 import { shareOrCopy } from "@/utils/browserUtil";
 import { createRecordingReviewUrl } from "@/utils/recordingReviewUrl";
-import HistoryGridLayout, { HistoryLayoutPicker } from "./HistoryGridLayout";
-import GridActivityStrip from "./GridActivityStrip";
-import { layoutOrder } from "@/utils/cameraGridUtil";
-import { useHistoryGrid } from "@/hooks/use-history-grid";
-import useKeyboardListener from "@/hooks/use-keyboard-listener";
-import { HISTORY_GRID_PRESETS } from "@/utils/cameraGridUtil";
 
 const DATA_REFRESH_TIME = 600000; // 10 minutes
-// grid cameras catch up with the main camera by playing a little faster or
-// slower; further behind than this they are seeked, which means rebuffering
-const GRID_SEEK_DRIFT_SECONDS = 2;
-// a camera ahead by up to this much (often after skipping damaged video)
-// waits for the main camera instead of being seeked back into the damage
-const GRID_WAIT_AHEAD_SECONDS = 15;
-// speed changes kick in past the first and stop below the second, so the
-// speed is not changed back and forth
-const GRID_NUDGE_START_SECONDS = 0.3;
-const GRID_NUDGE_STOP_SECONDS = 0.08;
-// speed change while catching up: small differences, then larger ones
-const GRID_SMALL_NUDGE = 0.05;
-const GRID_LARGE_NUDGE = 0.1;
-const GRID_LARGE_NUDGE_SECONDS = 1;
-// a paused grid is lined up to within this
-const GRID_PAUSED_ALIGN_SECONDS = 0.1;
-// a grid camera that has not shown a frame this long after a seek is seeked again
-const GRID_SEEK_RETRY_MS = 10000;
-// a seeked camera is not seeked again for this long
-const GRID_SEEK_SETTLE_MS = 1500;
-const GRID_SYNC_INTERVAL_MS = 500;
-// a main camera this far behind the others after it got stuck jumps ahead
-const GRID_MAIN_REJOIN_SECONDS = 1;
 
 type RecordingViewProps = {
   startCamera: string;
@@ -125,7 +93,7 @@ type RecordingViewProps = {
   allCameras: string[];
   allPreviews?: Preview[];
   filter?: ReviewFilter;
-  updateFilter: (newFilter: ReviewFilter, position?: RecordingPosition) => void;
+  updateFilter: (newFilter: ReviewFilter) => void;
   refreshData?: () => void;
   onMotionSearch?: (camera: string) => void;
 };
@@ -180,56 +148,6 @@ export function RecordingView({
   const cameraLayoutRef = useRef<HTMLDivElement | null>(null);
   const previewRowRef = useRef<HTMLDivElement | null>(null);
   const previewRefs = useRef<{ [camera: string]: PreviewController }>({});
-
-  // grid of every selected camera, kept in step with the main camera
-
-  // cameras switched off in the config have nothing new to show; keyed by
-  // content because the camera list is rebuilt on every render
-  const gridCamerasKey = effectiveCameras
-    .filter((camera) => config?.cameras[camera]?.enabled_in_config !== false)
-    .join(",");
-  const gridCameras = useMemo(
-    () => (gridCamerasKey ? gridCamerasKey.split(",") : []),
-    [gridCamerasKey],
-  );
-  const historyGrid = useHistoryGrid(gridCameras);
-  const gridActive = isDesktop && historyGrid.mode == "grid";
-  const [isGridEditMode, setIsGridEditMode] = useState(false);
-  const [enlargedCamera, setEnlargedCamera] = useState<string>();
-  // grid cameras besides the main one that play their sound
-  const [audibleCameras, setAudibleCameras] = useState<string[]>([]);
-  const gridControllers = useRef<{ [camera: string]: DynamicVideoController }>(
-    {},
-  );
-  const gridCameraTimes = useRef<{ [camera: string]: number }>({});
-  const gridSeekedAt = useRef<{ [camera: string]: number }>({});
-  // per grid camera: the speed change it plays with now, and whether it waits
-  const gridNudge = useRef<{ [camera: string]: number }>({});
-  const gridWaiting = useRef<{ [camera: string]: boolean }>({});
-  // the main camera got stuck (rebuffering or getting past damaged video)
-  const gridMainStuck = useRef(false);
-  const mainCameraTime = useRef(startTime);
-  // the main camera's own speed, which the grid cameras follow
-  const gridBaseRate = useRef(1);
-
-  // a seeked grid camera reports a stale time until it shows a frame, so its
-  // time is forgotten and sync leaves it alone until it reports again
-  const seekGridCamera = useCallback(
-    (
-      camera: string,
-      controller: DynamicVideoController,
-      time: number,
-      play: boolean,
-    ) => {
-      gridSeekedAt.current[camera] = Date.now();
-      delete gridCameraTimes.current[camera];
-      delete gridWaiting.current[camera];
-      gridNudge.current[camera] = 0;
-      controller.setPlaybackRate(gridBaseRate.current);
-      controller.seekToTimestamp(time, play);
-    },
-    [],
-  );
 
   const [playbackStart, setPlaybackStart] = useState(
     startTime >= timeRange.after && startTime <= timeRange.before
@@ -391,16 +309,6 @@ export function RecordingView({
       Object.values(previewRefs.current).forEach((controller) => {
         controller.scrubToTimestamp(currentTime);
       });
-
-      if (gridActive) {
-        Object.entries(gridControllers.current).forEach(
-          ([camera, controller]) => {
-            if (camera != mainCamera) {
-              controller.scrubToTimestamp(currentTime);
-            }
-          },
-        );
-      }
     }
     // we only want to seek when current time updates
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -421,28 +329,11 @@ export function RecordingView({
 
       if (currentTimeRange.after <= time && currentTimeRange.before >= time) {
         mainControllerRef.current?.seekToTimestamp(time, play);
-
-        if (gridActive) {
-          mainCameraTime.current = time;
-          Object.entries(gridControllers.current).forEach(
-            ([camera, controller]) => {
-              if (camera != mainCamera) {
-                seekGridCamera(camera, controller, time, play);
-              }
-            },
-          );
-        }
       } else {
         updateSelectedSegment(time, true);
       }
     },
-    [
-      currentTimeRange,
-      updateSelectedSegment,
-      gridActive,
-      mainCamera,
-      seekGridCamera,
-    ],
+    [currentTimeRange, updateSelectedSegment],
   );
 
   const onClipPrevious = useCallback(
@@ -530,313 +421,6 @@ export function RecordingView({
       }
     },
     [currentTime, allowedCameras],
-  );
-
-  // grid: the main camera drives the clock and the timeline, the others follow
-
-  const onMainTimestampUpdate = useCallback((timestamp: number) => {
-    mainCameraTime.current = timestamp;
-    setPlayerTime(timestamp);
-    setCurrentTime(timestamp);
-    Object.values(previewRefs.current ?? {}).forEach((prev) =>
-      prev.scrubToTimestamp(Math.floor(timestamp)),
-    );
-  }, []);
-
-  const ignoreFullResolution = useCallback<
-    React.Dispatch<React.SetStateAction<VideoResolutionType>>
-  >(() => {}, []);
-
-  const onSelectGridCamera = useCallback(
-    (camera: string) => {
-      if (allowedCameras.includes(camera)) {
-        mainCameraTime.current = currentTime;
-        setMainCamera(camera);
-      }
-    },
-    [allowedCameras, currentTime],
-  );
-
-  const onEnlargeGridCamera = useCallback(
-    (camera: string | undefined) => {
-      if (camera) {
-        onSelectGridCamera(camera);
-      }
-
-      setEnlargedCamera(camera);
-    },
-    [onSelectGridCamera],
-  );
-
-  useEffect(() => {
-    if (!gridActive) {
-      gridControllers.current = {};
-      gridCameraTimes.current = {};
-      setIsGridEditMode(false);
-      setEnlargedCamera(undefined);
-      return;
-    }
-
-    const controller = gridControllers.current[mainCamera];
-
-    if (controller) {
-      // a camera that was catching up may still run a little fast or slow
-      controller.setPlaybackRate(gridBaseRate.current);
-      mainControllerRef.current = controller;
-    }
-  }, [gridActive, mainCamera]);
-
-  const syncGridCameras = useCallback(
-    (force: boolean) => {
-      const main = mainControllerRef.current;
-
-      if (!gridActive || !main) {
-        return;
-      }
-
-      // while the main camera is stuck the others play on at the chosen
-      // speed, so one bad recording does not stall the whole grid
-      if (main.isRecovering() || (main.isPlaying() && !main.isReady())) {
-        gridMainStuck.current = true;
-        gridCameras.forEach((camera) => {
-          const controller = gridControllers.current[camera];
-
-          if (camera != mainCamera && controller) {
-            gridNudge.current[camera] = 0;
-            delete gridWaiting.current[camera];
-            controller.setPlaybackRate(gridBaseRate.current);
-          }
-        });
-        return;
-      }
-
-      // when it plays again it jumps to where the others are
-      if (gridMainStuck.current) {
-        gridMainStuck.current = false;
-        const mainTime = main.getTimestamp();
-        const others = gridCameras
-          .filter((camera) => camera != mainCamera)
-          .map((camera) => gridControllers.current[camera])
-          .filter(
-            (controller): controller is DynamicVideoController =>
-              controller != undefined &&
-              controller.isPlaying() &&
-              controller.isReady(),
-          )
-          .map((controller) => controller.getTimestamp())
-          .sort((a, b) => a - b);
-
-        if (others.length > 0) {
-          const median = others[Math.floor(others.length / 2)];
-
-          if (median - mainTime > GRID_MAIN_REJOIN_SECONDS) {
-            mainCameraTime.current = median;
-            main.seekToTimestamp(median, true);
-            return;
-          }
-        }
-      }
-
-      // read the players directly: the reported times lag by up to 250 ms
-      const time = main.getTimestamp() || mainCameraTime.current;
-      const playing = main.isPlaying();
-      const rate = main.getPlaybackRate();
-      const now = Date.now();
-      gridBaseRate.current = rate;
-
-      gridCameras.forEach((camera) => {
-        const controller = gridControllers.current[camera];
-
-        if (camera == mainCamera || !controller) {
-          return;
-        }
-
-        if (!controller.hasRecordingAtTime(time)) {
-          if (controller.isPlaying()) {
-            controller.pause();
-          }
-
-          return;
-        }
-
-        if (force) {
-          seekGridCamera(camera, controller, time, playing);
-          return;
-        }
-
-        // still loading after a seek or at the start: let it load, and only
-        // try again if it never shows a frame
-        if (gridCameraTimes.current[camera] == undefined) {
-          const seekedAt = gridSeekedAt.current[camera];
-
-          if (seekedAt != undefined && now - seekedAt > GRID_SEEK_RETRY_MS) {
-            seekGridCamera(camera, controller, time, playing);
-          } else if (playing && !controller.isPlaying()) {
-            controller.play();
-          }
-
-          return;
-        }
-
-        const drift = controller.getTimestamp() - time;
-        const settling =
-          now - (gridSeekedAt.current[camera] ?? 0) < GRID_SEEK_SETTLE_MS;
-
-        // ahead: hold still until the main camera gets there
-        if (
-          gridWaiting.current[camera] ||
-          (drift > GRID_SEEK_DRIFT_SECONDS && drift < GRID_WAIT_AHEAD_SECONDS)
-        ) {
-          if (
-            drift > GRID_NUDGE_STOP_SECONDS &&
-            drift < GRID_WAIT_AHEAD_SECONDS
-          ) {
-            gridWaiting.current[camera] = true;
-
-            if (controller.isPlaying()) {
-              controller.pause();
-            }
-
-            return;
-          }
-
-          delete gridWaiting.current[camera];
-        }
-
-        if (Math.abs(drift) > GRID_SEEK_DRIFT_SECONDS) {
-          if (!settling) {
-            seekGridCamera(camera, controller, time, playing);
-          }
-
-          return;
-        }
-
-        if (!playing) {
-          if (controller.isPlaying()) {
-            controller.pause();
-          }
-
-          gridNudge.current[camera] = 0;
-          controller.setPlaybackRate(rate);
-
-          if (Math.abs(drift) > GRID_PAUSED_ALIGN_SECONDS && !settling) {
-            seekGridCamera(camera, controller, time, false);
-          }
-
-          return;
-        }
-
-        // ahead plays slower, behind faster; with a gap between starting
-        // and stopping so the speed is not flipped every tick
-        let nudge = gridNudge.current[camera] ?? 0;
-
-        if (Math.abs(drift) > GRID_NUDGE_START_SECONDS) {
-          const size =
-            Math.abs(drift) > GRID_LARGE_NUDGE_SECONDS
-              ? GRID_LARGE_NUDGE
-              : GRID_SMALL_NUDGE;
-          nudge = drift > 0 ? -size : size;
-        } else if (Math.abs(drift) < GRID_NUDGE_STOP_SECONDS) {
-          nudge = 0;
-        }
-
-        gridNudge.current[camera] = nudge;
-        controller.setPlaybackRate(rate * (1 + nudge));
-
-        if (!controller.isPlaying() && controller.isReady()) {
-          controller.play();
-        }
-      });
-    },
-    [gridActive, mainCamera, gridCameras, seekGridCamera],
-  );
-
-  // the view re-renders several times a second while playing, so the timer
-  // reads the latest sync function from a ref instead of restarting
-  const syncGridCamerasRef = useRef(syncGridCameras);
-  syncGridCamerasRef.current = syncGridCameras;
-
-  useEffect(() => {
-    if (!gridActive || scrubbing || exportRange || debugReplayRange) {
-      return;
-    }
-
-    const interval = setInterval(
-      () => syncGridCamerasRef.current(false),
-      GRID_SYNC_INTERVAL_MS,
-    );
-
-    return () => clearInterval(interval);
-  }, [gridActive, scrubbing, exportRange, debugReplayRange]);
-
-  const wasScrubbing = useRef(false);
-
-  useEffect(() => {
-    if (wasScrubbing.current && !scrubbing && gridActive) {
-      mainCameraTime.current = currentTime;
-      syncGridCameras(true);
-    }
-
-    wasScrubbing.current = scrubbing;
-    // only when scrubbing ends
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scrubbing]);
-
-  const selectSingleLayout = useCallback(() => {
-    setPlaybackStart(currentTime);
-    historyGrid.showSingle();
-  }, [currentTime, historyGrid]);
-
-  const selectGridPreset = useCallback(
-    (preset: (typeof HISTORY_GRID_PRESETS)[number]["id"]) => {
-      if (!gridActive) {
-        setPlaybackStart(currentTime);
-      }
-
-      setEnlargedCamera(undefined);
-      historyGrid.applyPreset(preset, mainCamera);
-    },
-    [currentTime, gridActive, historyGrid, mainCamera],
-  );
-
-  // 1 = one camera, 2-4 = the quick layouts, e = edit the grid
-  useKeyboardListener(["1", "2", "3", "4", "e"], (key, modifiers) => {
-    if (
-      !key ||
-      !modifiers.down ||
-      modifiers.repeat ||
-      modifiers.ctrl ||
-      !isDesktop ||
-      gridCameras.length < 2 ||
-      !historyGrid.loaded
-    ) {
-      return false;
-    }
-
-    if (key == "e") {
-      if (!gridActive) {
-        return false;
-      }
-
-      setEnlargedCamera(undefined);
-      setIsGridEditMode(!isGridEditMode);
-    } else if (key == "1") {
-      selectSingleLayout();
-    } else {
-      selectGridPreset(HISTORY_GRID_PRESETS[Number(key) - 2].id);
-    }
-
-    return true;
-  });
-
-  // in the grid the timeline marks what happened on every camera shown
-  const timelineReviewItems = useMemo(
-    () =>
-      gridActive
-        ? (reviewItems?.filter((item) => gridCameras.includes(item.camera)) ??
-          [])
-        : mainCameraReviewItems,
-    [gridActive, gridCameras, reviewItems, mainCameraReviewItems],
   );
 
   // fullscreen
@@ -1066,19 +650,6 @@ export function RecordingView({
             </Button>
           </div>
           <div className="flex items-center justify-end gap-2">
-            {isDesktop && gridCameras.length > 1 && historyGrid.loaded && (
-              <HistoryLayoutPicker
-                mode={historyGrid.mode}
-                preset={historyGrid.preset}
-                isEditMode={isGridEditMode}
-                setIsEditMode={(editing) => {
-                  setEnlargedCamera(undefined);
-                  setIsGridEditMode(editing);
-                }}
-                onSelectSingle={selectSingleLayout}
-                onSelectPreset={selectGridPreset}
-              />
-            )}
             <MobileCameraDrawer
               allCameras={effectiveCameras}
               selected={mainCamera}
@@ -1145,10 +716,7 @@ export function RecordingView({
                     ...newFilter,
                     cameras: updatedCameras,
                   };
-                  updateFilter(adjustedFilter, {
-                    camera: mainCamera,
-                    time: currentTime,
-                  });
+                  updateFilter(adjustedFilter);
                 }}
                 setMotionOnly={() => {}}
               />
@@ -1288,229 +856,137 @@ export function RecordingView({
                 : "portrait:max-h-[50dvh] portrait:flex-shrink-0 portrait:flex-grow-0 portrait:basis-auto",
             )}
           >
-            {gridActive ? (
-              <div className="flex size-full min-h-0 flex-col gap-2">
-                <div className="min-h-0 flex-1">
-                  <HistoryGridLayout
-                    layout={historyGrid.layout}
-                    mainCamera={mainCamera}
-                    enlargedCamera={enlargedCamera}
-                    isEditMode={isGridEditMode}
-                    setIsEditMode={setIsGridEditMode}
-                    onSaveLayout={historyGrid.saveLayout}
-                    onSelectCamera={onSelectGridCamera}
-                    onEnlargeCamera={onEnlargeGridCamera}
-                    onSwapCameras={historyGrid.swapCameras}
-                    audibleCameras={audibleCameras}
-                    onToggleAudio={(camera) =>
-                      setAudibleCameras((current) =>
-                        current.includes(camera)
-                          ? current.filter((c) => c != camera)
-                          : [...current, camera],
-                      )
-                    }
-                    renderCamera={(camera, isMain) => (
-                      <GridRecordingsGate
-                        camera={camera}
-                        timeRange={currentTimeRange}
-                        isMain={isMain}
-                      >
-                        <DynamicVideoPlayer
-                          key={camera}
-                          className="size-full"
-                          camera={camera}
-                          timeRange={currentTimeRange}
-                          cameraPreviews={allPreviews ?? []}
-                          startTimestamp={playbackStart}
-                          hotKeys={
-                            isMain &&
-                            exportMode != "select" &&
-                            debugReplayMode != "select"
-                          }
-                          follower={!isMain}
-                          followerMuted={!audibleCameras.includes(camera)}
-                          fullscreen={fullscreen}
-                          onTimestampUpdate={
-                            isMain
-                              ? onMainTimestampUpdate
-                              : (timestamp) => {
-                                  gridCameraTimes.current[camera] = timestamp;
-                                }
-                          }
-                          onClipEnded={isMain ? onClipEnded : undefined}
-                          onClipPrevious={isMain ? onClipPrevious : undefined}
-                          onSeekToTime={manuallySetCurrentTime}
-                          onControllerReady={(controller) => {
-                            gridControllers.current[camera] = controller;
+            <div
+              className={cn(
+                "flex size-full items-center",
+                mainCameraAspect == "tall"
+                  ? "flex-row justify-evenly"
+                  : "flex-col justify-center gap-2",
+              )}
+            >
+              <div
+                key={mainCamera}
+                className={cn(
+                  "relative flex max-h-full min-h-0 min-w-0 max-w-full items-center justify-center",
+                  isDesktop
+                    ? // Desktop: dynamically switch between w-full and h-full based on
+                      // container vs camera aspect ratio to ensure proper fitting
+                      useHeightBased
+                      ? "h-full"
+                      : "w-full"
+                    : cn(
+                        "flex-shrink-0 portrait:w-full landscape:h-full",
+                        mainCameraAspect == "wide"
+                          ? "aspect-wide"
+                          : mainCameraAspect == "tall"
+                            ? "aspect-tall portrait:h-full"
+                            : "aspect-video",
+                      ),
+                )}
+                style={{
+                  aspectRatio: getCameraAspect(mainCamera),
+                }}
+              >
+                {(isDesktop || isTablet) && (
+                  <GenAISummaryDialog
+                    review={activeReviewItem}
+                    onOpen={onAnalysisOpen}
+                  >
+                    <GenAISummaryChip review={activeReviewItem} />
+                  </GenAISummaryDialog>
+                )}
 
-                            if (isMain) {
-                              mainControllerRef.current = controller;
-                            }
-                          }}
-                          isScrubbing={
-                            scrubbing ||
-                            exportMode == "timeline" ||
-                            exportMode == "timeline_multi" ||
-                            debugReplayMode == "timeline"
-                          }
-                          supportsFullscreen={supportsFullScreen}
-                          setFullResolution={
-                            isMain ? setFullResolution : ignoreFullResolution
-                          }
-                          toggleFullscreen={toggleFullscreen}
-                          containerRef={mainLayoutRef}
-                        />
-                      </GridRecordingsGate>
-                    )}
-                  />
-                </div>
-                <GridActivityStrip
-                  config={config}
-                  timezone={timezone}
-                  cameras={layoutOrder(historyGrid.layout)}
-                  mainCamera={mainCamera}
+                <DynamicVideoPlayer
+                  className={grow}
+                  camera={mainCamera}
                   timeRange={currentTimeRange}
-                  currentTime={currentTime}
-                  reviewItems={reviewItems ?? []}
-                  onSeek={(time, camera) => {
-                    if (camera && camera != mainCamera) {
-                      onSelectGridCamera(camera);
-                    }
-
-                    manuallySetCurrentTime(time, true);
+                  cameraPreviews={allPreviews ?? []}
+                  startTimestamp={playbackStart}
+                  hotKeys={
+                    exportMode != "select" && debugReplayMode != "select"
+                  }
+                  fullscreen={fullscreen}
+                  onTimestampUpdate={(timestamp) => {
+                    setPlayerTime(timestamp);
+                    setCurrentTime(timestamp);
+                    Object.values(previewRefs.current ?? {}).forEach((prev) =>
+                      prev.scrubToTimestamp(Math.floor(timestamp)),
+                    );
                   }}
-                  onSelectCamera={onSelectGridCamera}
-                  setScrubbing={setScrubbing}
-                  setCurrentTime={setCurrentTime}
+                  onClipEnded={onClipEnded}
+                  onClipPrevious={onClipPrevious}
+                  onSeekToTime={manuallySetCurrentTime}
+                  onControllerReady={(controller) => {
+                    mainControllerRef.current = controller;
+                  }}
+                  isScrubbing={
+                    scrubbing ||
+                    exportMode == "timeline" ||
+                    exportMode == "timeline_multi" ||
+                    debugReplayMode == "timeline"
+                  }
+                  supportsFullscreen={supportsFullScreen}
+                  setFullResolution={setFullResolution}
+                  toggleFullscreen={toggleFullscreen}
+                  containerRef={mainLayoutRef}
                 />
               </div>
-            ) : (
-              <div
-                className={cn(
-                  "flex size-full items-center",
-                  mainCameraAspect == "tall"
-                    ? "flex-row justify-evenly"
-                    : "flex-col justify-center gap-2",
-                )}
-              >
+              {isDesktop && effectiveCameras.length > 1 && (
                 <div
-                  key={mainCamera}
+                  ref={previewRowRef}
                   className={cn(
-                    "relative flex max-h-full min-h-0 min-w-0 max-w-full items-center justify-center",
-                    isDesktop
-                      ? // Desktop: dynamically switch between w-full and h-full based on
-                        // container vs camera aspect ratio to ensure proper fitting
-                        useHeightBased
-                        ? "h-full"
-                        : "w-full"
-                      : cn(
-                          "flex-shrink-0 portrait:w-full landscape:h-full",
-                          mainCameraAspect == "wide"
-                            ? "aspect-wide"
-                            : mainCameraAspect == "tall"
-                              ? "aspect-tall portrait:h-full"
-                              : "aspect-video",
-                        ),
+                    "scrollbar-container flex flex-shrink-0 gap-2 overflow-auto",
+                    mainCameraAspect == "tall"
+                      ? "ml-2 h-full w-72 min-w-72 flex-col"
+                      : "h-28 min-h-28 w-full",
+                    previewRowOverflows ? "" : "items-center justify-center",
+                    timelineType == "detail" && isDesktop && "mt-4",
                   )}
-                  style={{
-                    aspectRatio: getCameraAspect(mainCamera),
-                  }}
                 >
-                  {(isDesktop || isTablet) && (
-                    <GenAISummaryDialog
-                      review={activeReviewItem}
-                      onOpen={onAnalysisOpen}
-                    >
-                      <GenAISummaryChip review={activeReviewItem} />
-                    </GenAISummaryDialog>
-                  )}
-
-                  <DynamicVideoPlayer
-                    className={grow}
-                    camera={mainCamera}
-                    timeRange={currentTimeRange}
-                    cameraPreviews={allPreviews ?? []}
-                    startTimestamp={playbackStart}
-                    hotKeys={
-                      exportMode != "select" && debugReplayMode != "select"
+                  <div className="w-2" />
+                  {effectiveCameras.map((cam) => {
+                    if (cam == mainCamera || cam == "birdseye") {
+                      return;
                     }
-                    fullscreen={fullscreen}
-                    onTimestampUpdate={onMainTimestampUpdate}
-                    onClipEnded={onClipEnded}
-                    onClipPrevious={onClipPrevious}
-                    onSeekToTime={manuallySetCurrentTime}
-                    onControllerReady={(controller) => {
-                      mainControllerRef.current = controller;
-                    }}
-                    isScrubbing={
-                      scrubbing ||
-                      exportMode == "timeline" ||
-                      exportMode == "timeline_multi" ||
-                      debugReplayMode == "timeline"
-                    }
-                    supportsFullscreen={supportsFullScreen}
-                    setFullResolution={setFullResolution}
-                    toggleFullscreen={toggleFullscreen}
-                    containerRef={mainLayoutRef}
-                  />
-                </div>
-                {isDesktop && effectiveCameras.length > 1 && (
-                  <div
-                    ref={previewRowRef}
-                    className={cn(
-                      "scrollbar-container flex flex-shrink-0 gap-2 overflow-auto",
-                      mainCameraAspect == "tall"
-                        ? "ml-2 h-full w-72 min-w-72 flex-col"
-                        : "h-28 min-h-28 w-full",
-                      previewRowOverflows ? "" : "items-center justify-center",
-                      timelineType == "detail" && isDesktop && "mt-4",
-                    )}
-                  >
-                    <div className="w-2" />
-                    {effectiveCameras.map((cam) => {
-                      if (cam == mainCamera || cam == "birdseye") {
-                        return;
-                      }
 
-                      return (
-                        <Tooltip key={cam}>
-                          <TooltipTrigger asChild>
-                            <div
-                              className={
-                                mainCameraAspect == "tall" ? "w-full" : "h-full"
-                              }
-                              style={{
-                                aspectRatio: getCameraAspect(cam),
+                    return (
+                      <Tooltip key={cam}>
+                        <TooltipTrigger asChild>
+                          <div
+                            className={
+                              mainCameraAspect == "tall" ? "w-full" : "h-full"
+                            }
+                            style={{
+                              aspectRatio: getCameraAspect(cam),
+                            }}
+                          >
+                            <PreviewPlayer
+                              previewRef={previewRef}
+                              className="size-full"
+                              camera={cam}
+                              timeRange={currentTimeRange}
+                              cameraPreviews={allPreviews ?? []}
+                              startTime={startTime}
+                              isScrubbing={scrubbing}
+                              isVisible={visiblePreviews.includes(cam)}
+                              onControllerReady={(controller) => {
+                                previewRefs.current[cam] = controller;
+                                controller.scrubToTimestamp(startTime);
                               }}
-                            >
-                              <PreviewPlayer
-                                previewRef={previewRef}
-                                className="size-full"
-                                camera={cam}
-                                timeRange={currentTimeRange}
-                                cameraPreviews={allPreviews ?? []}
-                                startTime={startTime}
-                                isScrubbing={scrubbing}
-                                isVisible={visiblePreviews.includes(cam)}
-                                onControllerReady={(controller) => {
-                                  previewRefs.current[cam] = controller;
-                                  controller.scrubToTimestamp(startTime);
-                                }}
-                                onClick={() => onSelectCamera(cam)}
-                              />
-                            </div>
-                          </TooltipTrigger>
-                          <TooltipContent className="smart-capitalize">
-                            <CameraNameLabel camera={cam} />
-                          </TooltipContent>
-                        </Tooltip>
-                      );
-                    })}
-                    <div className="w-2" />
-                  </div>
-                )}
-              </div>
-            )}
+                              onClick={() => onSelectCamera(cam)}
+                            />
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent className="smart-capitalize">
+                          <CameraNameLabel camera={cam} />
+                        </TooltipContent>
+                      </Tooltip>
+                    );
+                  })}
+                  <div className="w-2" />
+                </div>
+              )}
+            </div>
           </div>
           <Timeline
             contentRef={contentRef}
@@ -1522,8 +998,6 @@ export function RecordingView({
             }
             timeRange={timeRange}
             mainCameraReviewItems={mainCameraReviewItems}
-            timelineReviewItems={timelineReviewItems}
-            motionCameras={gridActive ? gridCameras.join(",") : mainCamera}
             activeReviewItem={activeReviewItem}
             currentTime={currentTime}
             exportRange={
@@ -1550,43 +1024,6 @@ export function RecordingView({
   );
 }
 
-type GridRecordingsGateProps = {
-  camera: string;
-  timeRange: TimeRange;
-  isMain: boolean;
-  children: ReactNode;
-};
-// a grid camera without any recordings in the hour (offline, or switched
-// off for a while) gets a note instead of a player that waits forever; the
-// main camera always keeps its player, which drives the clock
-function GridRecordingsGate({
-  camera,
-  timeRange,
-  isMain,
-  children,
-}: GridRecordingsGateProps) {
-  const { t } = useTranslation(["views/events"]);
-  // the same request the camera's player makes, so it comes from the cache
-  const recordingParams = useMemo(
-    () => ({ before: timeRange.before, after: timeRange.after }),
-    [timeRange],
-  );
-  const { data: recordings } = useSWR<Recording[]>(
-    [`${camera}/recordings`, recordingParams],
-    { revalidateOnFocus: false },
-  );
-
-  if (!isMain && recordings != undefined && recordings.length == 0) {
-    return (
-      <div className="flex size-full items-center justify-center bg-secondary p-2 text-center text-sm text-secondary-foreground">
-        {t("grid.noRecordings")}
-      </div>
-    );
-  }
-
-  return <>{children}</>;
-}
-
 type TimelineProps = {
   contentRef: MutableRefObject<HTMLDivElement | null>;
   timelineRef?: MutableRefObject<HTMLDivElement | null>;
@@ -1594,10 +1031,6 @@ type TimelineProps = {
   timelineType: TimelineType;
   timeRange: TimeRange;
   mainCameraReviewItems: ReviewSegment[];
-  // review items and motion shown on the timeline; more than the main
-  // camera's when History shows a grid
-  timelineReviewItems: ReviewSegment[];
-  motionCameras: string;
   activeReviewItem?: ReviewSegment;
   currentTime: number;
   exportRange?: TimeRange;
@@ -1615,8 +1048,6 @@ function Timeline({
   timelineType,
   timeRange,
   mainCameraReviewItems,
-  timelineReviewItems,
-  motionCameras,
   activeReviewItem,
   currentTime,
   exportRange,
@@ -1686,7 +1117,7 @@ function Timeline({
       before: alignedBefore,
       after: alignedAfter,
       scale: Math.round(zoomSettings.segmentDuration / 2),
-      cameras: motionCameras,
+      cameras: mainCamera,
     },
   ]);
 
@@ -1794,7 +1225,7 @@ function Timeline({
             setExportEndTime={setExportEndTime}
             handlebarTime={currentTime}
             setHandlebarTime={setCurrentTime}
-            events={timelineReviewItems}
+            events={mainCameraReviewItems}
             motion_events={motionData ?? []}
             noRecordingRanges={noRecordings ?? []}
             contentRef={contentRef}
@@ -1825,12 +1256,12 @@ function Timeline({
               isMobile && "sm:portrait:grid-cols-2",
             )}
           >
-            {timelineReviewItems.length === 0 ? (
+            {mainCameraReviewItems.length === 0 ? (
               <div className="mt-5 text-center text-primary">
                 {t("events.noFoundForTimePeriod")}
               </div>
             ) : (
-              timelineReviewItems.map((review) => {
+              mainCameraReviewItems.map((review) => {
                 if (review.severity === "significant_motion") {
                   return;
                 }

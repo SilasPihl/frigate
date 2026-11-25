@@ -1,0 +1,218 @@
+import { Recording } from "@/types/record";
+import { DynamicPlayback } from "@/types/playback";
+import { PreviewController } from "@/components/player/PreviewPlayer";
+import { TimeRange, TrackingDetailsSequence } from "@/types/timeline";
+import {
+  calculateInpointOffset,
+  calculateSeekPosition,
+} from "@/utils/videoUtil";
+import { playWithTemporaryMuteFallback } from "@/utils/videoUtil.ts";
+
+type PlayerMode = "playback" | "scrubbing";
+
+// how long a seek may wait for its `seeked` event before playback starts
+// anyway; long enough that a normally completing seek always wins
+const SEEK_PLAY_FALLBACK_MS = 1000;
+
+export class DynamicVideoController {
+  // main state
+  public camera = "";
+  private playerController: HTMLVideoElement;
+  private previewController: PreviewController;
+  private setNoRecording: (noRecs: boolean) => void;
+  private setFocusedItem: (timeline: TrackingDetailsSequence) => void;
+  private playerMode: PlayerMode = "playback";
+
+  // playback
+  private recordings: Recording[] = [];
+  private timeRange: TimeRange = { after: 0, before: 0 };
+  private inpointOffset: number = 0;
+  private annotationOffset: number;
+  private timeToStart: number | undefined = undefined;
+
+  constructor(
+    camera: string,
+    playerController: HTMLVideoElement,
+    previewController: PreviewController,
+    annotationOffset: number,
+    defaultMode: PlayerMode,
+    setNoRecording: (noRecs: boolean) => void,
+    setFocusedItem: (timeline: TrackingDetailsSequence) => void,
+  ) {
+    this.camera = camera;
+    this.playerController = playerController;
+    this.previewController = previewController;
+    this.annotationOffset = annotationOffset;
+    this.playerMode = defaultMode;
+    this.setNoRecording = setNoRecording;
+    this.setFocusedItem = setFocusedItem;
+  }
+
+  newPlayback(newPlayback: DynamicPlayback) {
+    this.recordings = newPlayback.recordings;
+    this.timeRange = newPlayback.timeRange;
+    this.inpointOffset = calculateInpointOffset(
+      this.timeRange.after,
+      this.recordings[0],
+    );
+
+    if (this.timeToStart) {
+      this.seekToTimestamp(this.timeToStart);
+      this.timeToStart = undefined;
+    }
+  }
+
+  play() {
+    // a pause or seek right after interrupts the returned promise; that is fine
+    this.playerController.play()?.catch(() => {});
+  }
+
+  pause() {
+    this.playerController.pause();
+  }
+
+  isPlaying(): boolean {
+    return (
+      (!this.playerController.paused && !this.playerController.ended) ||
+      // the player is getting past damaged video and will carry on playing
+      this.playerController.dataset.recovering == "true"
+    );
+  }
+
+  // getting past damaged video; its time jumps when it is back
+  isRecovering(): boolean {
+    return this.playerController.dataset.recovering == "true";
+  }
+
+  // the recording timestamp shown right now
+  getTimestamp(): number {
+    return this.getProgress(
+      this.playerController.currentTime + this.inpointOffset,
+    );
+  }
+
+  // enough is buffered to keep playing
+  isReady(): boolean {
+    return (
+      this.playerController.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA
+    );
+  }
+
+  getPlaybackRate(): number {
+    return this.playerController.playbackRate;
+  }
+
+  setPlaybackRate(rate: number) {
+    if (this.playerController.playbackRate != rate) {
+      this.playerController.playbackRate = rate;
+    }
+  }
+
+  seekToTimestamp(time: number, play: boolean = false) {
+    if (time < this.timeRange.after || time > this.timeRange.before) {
+      this.timeToStart = time;
+      return;
+    }
+
+    if (this.playerMode != "playback") {
+      this.playerMode = "playback";
+    }
+
+    const seekSeconds = calculateSeekPosition(
+      time,
+      this.recordings,
+      this.inpointOffset,
+    );
+
+    if (seekSeconds === undefined) {
+      this.setNoRecording(true);
+      return;
+    }
+
+    if (seekSeconds != 0) {
+      this.playerController.currentTime = seekSeconds;
+
+      if (play) {
+        this.waitAndPlay();
+      } else {
+        this.playerController.pause();
+      }
+    } else {
+      // no op
+    }
+  }
+
+  waitAndPlay() {
+    return new Promise((resolve) => {
+      let fallback: NodeJS.Timeout | undefined;
+
+      const onSeekedHandler = () => {
+        clearTimeout(fallback);
+        this.playerController.removeEventListener("seeked", onSeekedHandler);
+        playWithTemporaryMuteFallback(this.playerController);
+        resolve(undefined);
+      };
+
+      this.playerController.addEventListener("seeked", onSeekedHandler, {
+        once: true,
+      });
+
+      // iOS ManagedMediaSource pauses hls.js buffering, so `seeked` may
+      // never fire; playing is what prompts WebKit to resume streaming
+      if ("ManagedMediaSource" in window) {
+        fallback = setTimeout(onSeekedHandler, SEEK_PLAY_FALLBACK_MS);
+      }
+    });
+  }
+
+  seekToTimelineItem(timeline: TrackingDetailsSequence) {
+    this.playerController.pause();
+    this.seekToTimestamp(timeline.timestamp + this.annotationOffset);
+    this.setFocusedItem(timeline);
+  }
+
+  getProgress(playerTime: number): number {
+    // take a player time in seconds and convert to timestamp in timeline
+    let timestamp = 0;
+    let totalTime = 0;
+    (this.recordings || []).every((segment) => {
+      if (totalTime + segment.duration > playerTime) {
+        // segment is here
+        timestamp = segment.start_time + (playerTime - totalTime);
+        return false;
+      } else {
+        totalTime += segment.duration;
+        return true;
+      }
+    });
+
+    return timestamp;
+  }
+
+  scrubToTimestamp(time: number, saveIfNotReady: boolean = false) {
+    const scrubResult = this.previewController.scrubToTimestamp(time);
+
+    if (!scrubResult && saveIfNotReady) {
+      this.previewController.setNewPreviewStartTime(time);
+    }
+
+    if (scrubResult && this.playerMode != "scrubbing") {
+      this.playerMode = "scrubbing";
+      this.playerController.pause();
+    }
+  }
+
+  hasRecordingAtTime(time: number): boolean {
+    if (!this.recordings || this.recordings.length == 0) {
+      return false;
+    }
+
+    return (
+      this.recordings.find(
+        (segment) => segment.start_time <= time && segment.end_time >= time,
+      ) != undefined
+    );
+  }
+}
+
+export default typeof DynamicVideoController;

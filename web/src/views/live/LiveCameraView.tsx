@@ -70,6 +70,7 @@ import {
   LuEarOff,
   LuExternalLink,
   LuHistory,
+  LuLayoutGrid,
   LuInfo,
   LuPictureInPicture,
   LuPower,
@@ -576,6 +577,30 @@ export default function LiveCameraView({
                   <div className="text-primary">
                     {t("button.history", { ns: "common" })}
                   </div>
+                )}
+              </Button>
+              {/* History (custom): the grid view in web/src/custom-history */}
+              <Button
+                className="flex items-center gap-2.5 rounded-lg"
+                aria-label="History (custom)"
+                size="sm"
+                onClick={() => {
+                  navigate("review", {
+                    state: {
+                      severity: "alert",
+                      recording: {
+                        camera: camera.name,
+                        startTime: Date.now() / 1000 - 30,
+                        severity: "alert",
+                        custom: true,
+                      } as RecordingStartingPoint,
+                    },
+                  });
+                }}
+              >
+                <LuLayoutGrid className="size-5 text-secondary-foreground" />
+                {isDesktop && (
+                  <div className="text-primary">History (custom)</div>
                 )}
               </Button>
             </div>

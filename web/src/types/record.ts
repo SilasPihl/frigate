@@ -41,12 +41,8 @@ export type RecordingStartingPoint = {
   severity: ReviewSeverity;
   timelineType?: TimelineType;
   navigationSource?: "shared-link";
-};
-
-// where the recording page is when it hands a change back to its parent
-export type RecordingPosition = {
-  camera: string;
-  time: number;
+  // open in History (custom), the grid view in web/src/custom-history
+  custom?: boolean;
 };
 
 export type RecordingPlayerError = "stalled" | "startup";

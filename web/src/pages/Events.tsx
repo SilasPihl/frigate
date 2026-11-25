@@ -6,7 +6,7 @@ import { useTimezone } from "@/hooks/use-date-utils";
 import { useOverlayState, useSearchEffect } from "@/hooks/use-overlay-state";
 import { useUserPersistence } from "@/hooks/use-user-persistence";
 import { FrigateConfig } from "@/types/frigateConfig";
-import { RecordingPosition, RecordingStartingPoint } from "@/types/record";
+import { RecordingStartingPoint } from "@/types/record";
 import {
   RecordingsSummary,
   REVIEW_PADDING,
@@ -28,6 +28,8 @@ import {
 import EventView from "@/views/events/EventView";
 import MotionSearchView from "@/views/motion-search/MotionSearchView";
 import { RecordingView } from "@/views/recording/RecordingView";
+import { CustomRecordingView } from "@/custom-history/CustomRecordingView";
+import { useCustomUpdateFilter } from "@/custom-history/use-custom-update-filter";
 import { useFrigateReviews } from "@/api/ws";
 import axios from "axios";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -247,31 +249,22 @@ export default function Events() {
   });
 
   const onUpdateFilter = useCallback(
-    (newFilter: ReviewFilter, position?: RecordingPosition) => {
+    (newFilter: ReviewFilter) => {
       setReviewFilter(newFilter);
 
-      if (recording == undefined) {
-        return;
-      }
-
-      // a new date on the recording page starts at that date; any other
-      // filter change keeps the place being watched
-      const newAfter = newFilter.after;
-      const dateChanged =
-        newAfter != undefined &&
-        (newAfter != reviewFilter?.after ||
-          newFilter.before != reviewFilter?.before);
-
-      if (dateChanged) {
-        setRecording({ ...recording, startTime: newAfter }, true);
-      } else if (position) {
-        setRecording(
-          { ...recording, camera: position.camera, startTime: position.time },
-          true,
-        );
+      // update recording start time if filter
+      // was changed on recording page
+      if (recording != undefined && newFilter.after != undefined) {
+        setRecording({ ...recording, startTime: newFilter.after }, true);
       }
     },
-    [recording, reviewFilter, setRecording, setReviewFilter],
+    [recording, setRecording, setReviewFilter],
+  );
+  const onUpdateFilterCustom = useCustomUpdateFilter(
+    recording,
+    reviewFilter,
+    setRecording,
+    setReviewFilter,
   );
 
   useSearchEffect(RECORDING_REVIEW_LINK_PARAM, (reviewLinkValue: string) => {
@@ -695,8 +688,9 @@ export default function Events() {
 
   if (recording) {
     if (selectedReviewData) {
+      const HistoryView = recording.custom ? CustomRecordingView : RecordingView;
       return (
-        <RecordingView
+        <HistoryView
           key={selectedTimeRange.before}
           startCamera={selectedReviewData.camera}
           startTime={selectedReviewData.start_time}
@@ -706,7 +700,7 @@ export default function Events() {
           allPreviews={allPreviews}
           timeRange={selectedTimeRange}
           filter={reviewFilter}
-          updateFilter={onUpdateFilter}
+          updateFilter={recording.custom ? onUpdateFilterCustom : onUpdateFilter}
           refreshData={reloadData}
           onMotionSearch={(camera) => {
             setMotionSearchCamera(camera);
